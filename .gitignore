@@ -1,0 +1,23 @@
+# Secrets / config
+.env
+
+# Runtime data artifacts (never commit the master DB or source PDFs)
+data/incoming/
+data/staging/
+data/exports/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

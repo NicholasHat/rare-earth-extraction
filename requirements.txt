@@ -1,0 +1,7 @@
+# REE Extraction Dashboard — Phase A1 dependencies
+streamlit>=1.40
+anthropic>=0.69
+pandas>=2.2
+openpyxl>=3.1          # XLSX export/read for staging artifacts
+pypdf>=5.1             # PDF metadata / DOI parsing / raster-vs-vector inspection
+python-dotenv>=1.0     # load .env (REQUIRE_PASSWORD, WRITE_PASSWORD, ANTHROPIC_API_KEY)

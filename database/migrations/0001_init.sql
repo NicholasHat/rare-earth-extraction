@@ -1,0 +1,7 @@
+-- Migration 0001 — initial schema.
+--
+-- The canonical, idempotent initial schema lives in ../schema.sql and is applied
+-- by database.connection.init_db() / get_conn() on first use. This file marks the
+-- baseline migration so future schema changes can be added as numbered files here
+-- (0002_*.sql, 0003_*.sql, ...) and applied in order. Never edit a shipped
+-- migration; add a new one.
