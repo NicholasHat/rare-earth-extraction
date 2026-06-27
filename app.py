@@ -14,7 +14,7 @@ import streamlit as st
 
 import auth
 import config
-from database import connection, extractions_repo, merge
+from database import connection, merge
 from extraction import runner
 from extraction.parse_output import ParseError
 from extraction.prompt_loader import PromptNotReadyError
@@ -26,34 +26,6 @@ st.set_page_config(page_title="REE Extraction Dashboard", layout="wide")
 
 # Ensure the data dir + schema exist before anything reads the DB.
 connection.init_db()
-
-
-# --------------------------------------------------------------------------- #
-# Sidebar — corpus stats and run configuration
-# --------------------------------------------------------------------------- #
-def render_sidebar() -> None:
-    st.sidebar.header("Master database")
-    conn = connection.get_conn()
-    try:
-        n_papers = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
-        n_runs = conn.execute(
-            "SELECT COUNT(*) FROM prompt_runs WHERE status='approved'"
-        ).fetchone()[0]
-        n_best = extractions_repo.count_current_best(conn)
-    finally:
-        conn.close()
-    st.sidebar.metric("Papers", n_papers)
-    st.sidebar.metric("Approved runs", n_runs)
-    st.sidebar.metric("Rows in current-best view", n_best)
-
-    st.sidebar.divider()
-    st.sidebar.caption("Run configuration")
-    st.sidebar.write(f"**Prompt:** `{config.EXTRACTION_PROMPT_VERSION}`")
-    st.sidebar.write(f"**Model:** `{config.EXTRACTION_MODEL}`")
-    mode = "🔓 open (no password)" if not config.REQUIRE_PASSWORD else (
-        "🔒 unlocked" if auth.is_unlocked() else "🔒 password required"
-    )
-    st.sidebar.write(f"**Write mode:** {mode}")
 
 
 # --------------------------------------------------------------------------- #
@@ -221,7 +193,6 @@ def render_review_queue() -> None:
 def main() -> None:
     st.title("REE Extraction Dashboard")
     st.caption("Phase A2 — batch PDF upload → 26-column tables → review → merge")
-    render_sidebar()
 
     uploaded_files = st.file_uploader(
         "Upload one or more research-paper PDFs", type=["pdf"], accept_multiple_files=True
