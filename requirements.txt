@@ -5,3 +5,6 @@ pandas>=2.2
 openpyxl>=3.1          # XLSX export/read for staging artifacts
 pypdf>=5.1             # PDF metadata / DOI parsing / raster-vs-vector inspection
 python-dotenv>=1.0     # load .env (REQUIRE_PASSWORD, WRITE_PASSWORD, ANTHROPIC_API_KEY)
+pdfplumber>=0.11       # deterministic curve extractor — vector geometry (extraction/curve_extractor)
+numpy>=2.0             # curve extractor — clustering / least-squares fit
+scipy>=1.13            # curve extractor — raster path connected-component blob detection
