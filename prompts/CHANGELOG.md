@@ -4,7 +4,29 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v5.2 — code-execution digitization (current pinned default)
+## extraction_v6 — deterministic curve pre-pass anchor (current pinned default)
+- A deterministic pass (`extraction/curve_prepass.py`, using the vector curve
+  extractor) runs BEFORE the model call and injects a "DETERMINISTIC CURVE
+  ANALYSIS" block into the user turn: authoritative per-series marker counts for
+  clean single-panel vector figures (ground truth the model must match), softer
+  estimates for multi-panel figures, and a raster-image flag. Directly attacks
+  the under-digitisation failure mode by telling the model how many points each
+  curve actually has (docs/curve_extractor_plan.md §6).
+- The same counts feed a new `deterministic_curve_count` QA check (README §9).
+- **Cost fix:** on an authoritative page, the model is told to treat the count as
+  a stopping condition — one clustering pass, no trial-and-error tolerance
+  guessing, no re-rendering the page to "visually re-confirm" a count that
+  already matches, no narrated multi-attempt prose. This targets the diagnosed
+  dominant cost driver directly (iterative narrated clustering + repeated image
+  re-rendering), not just the under-counting. Estimate/raster pages keep the
+  full visual-diligence path since they have no verified count to target.
+- Core extraction behaviour (Steps 0–10) is unchanged from v5.2.
+- (Not yet validated live — no `prompt_runs` record exists for this version;
+  the one live attempt failed on insufficient API credits before producing
+  output. This changelog entry was revised once, in place, before any run used
+  it — once a run is recorded against it, future changes fork a new version.)
+
+## extraction_v5.2 — code-execution digitization
 - Flips the "How you receive the paper" note: the model is now also given the
   PDF inside a **code execution** sandbox (`anthropic_client.py`), so Steps 2–6's
   `pdfplumber`/`numpy` snippets are run for real (vector/raster detection, axis

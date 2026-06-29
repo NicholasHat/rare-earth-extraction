@@ -48,6 +48,7 @@ def run(
     *,
     figure_is_curve: bool = True,
     coercion_failures: int = 0,
+    deterministic_counts: list[int] | None = None,
 ) -> QAReport:
     """Run all checks and return a QAReport.
 
@@ -55,6 +56,9 @@ def run(
     (vs. a single-condition table) — it gates the sparse-result check.
     `coercion_failures` is the count of cells that were non-null in the model
     output but failed to parse as numbers (the OCR-garbled signal).
+    `deterministic_counts` are the authoritative per-series marker counts from
+    the curve pre-pass (extraction/curve_prepass.py); when present they drive a
+    cross-check that the model didn't under-digitise vs the real markers.
     """
     text_endpoints = text_endpoints or []
     report = QAReport()
@@ -69,6 +73,7 @@ def run(
     _duplicate_rows(df, report)
     _vocabulary(df, report)
     _text_endpoint_cross_check(df, text_endpoints, report)
+    _deterministic_curve_count(df, deterministic_counts, report)
     return report
 
 
@@ -111,6 +116,39 @@ def _row_count_sanity(df: pd.DataFrame, figure_is_curve: bool, report: QAReport)
                 "under-extraction (model stopped early instead of digitizing the "
                 "whole curve).",
             )
+
+
+def _deterministic_curve_count(
+    df: pd.DataFrame, deterministic_counts: list[int] | None, report: QAReport
+) -> None:
+    """Cross-check the model's per-element row counts against the authoritative
+    per-series marker counts the deterministic pre-pass found in the PDF geometry.
+
+    Conservative on purpose: the pre-pass counts are per *figure series* and the
+    DataFrame is per *element* (one element may appear across several figures), so
+    we compare sorted-descending and only flag when the model falls materially
+    short (< 80%) of a known count — a robust signal of under-digitisation that
+    doesn't penalise the fuzzy figure↔element correspondence. AMBER, not RED,
+    because the multi-figure mapping is approximate.
+    """
+    if not deterministic_counts:
+        return
+    llm_counts = sorted((len(sub) for _, sub in _element_groups(df)), reverse=True)
+    det = sorted(deterministic_counts, reverse=True)
+    short = []
+    for i, dc in enumerate(det):
+        lc = llm_counts[i] if i < len(llm_counts) else 0
+        if lc < 0.8 * dc:
+            short.append((dc, lc))
+    if short:
+        report.add(
+            "deterministic_curve_count",
+            Severity.AMBER,
+            f"Deterministic geometry found series with marker counts {det}, but the "
+            f"model's largest per-element counts {llm_counts[:len(det)]} fall short on "
+            f"{len(short)} of them (e.g. expected ~{short[0][0]}, got {short[0][1]}). "
+            "Likely under-digitisation — verify those curves captured every point.",
+        )
 
 
 def _axis_bounds(df: pd.DataFrame, report: QAReport) -> None:

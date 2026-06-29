@@ -16,10 +16,15 @@ Two validation papers probed with `pdfplumber`, revealing a fork the plan only h
   merge). This is locked in by an integration test.
 - **Quinn et al. 2015** (Elsevier, same publisher) — **every figure is an embedded raster image**
   (200 DPI grayscale), so the vector path cannot touch it; it routes to the **raster CV path**.
-  That path is a **first cut**: it renders + suppresses connecting lines + finds blobs, but the
-  count is still **contaminated by baked-in figure text** (axis numbers, legend, panel titles are
-  pixels, not PDF chars) — 826 blobs vs ~280 true markers. It self-flags low confidence. **To
-  reach vector-parity it needs panel-interior segmentation + text exclusion** (see §8) — not yet built.
+  That path now applies line suppression + a **marker-shape/size filter** + **conservative
+  text-row removal**, cutting contamination ~4–11× (Quinn Fig. 2: 826 raw blobs → 300 marker-shaped
+  → **190** after text-row removal; all five figure pages land in plausible ranges). It returns
+  filled/stroked type counts and a transparent ESTIMATE warning chain. **It is still an estimate,
+  not ground truth** — there is no verified per-panel oracle, monochrome multi-panel raster is the
+  hardest case, and full panel-interior segmentation proved too figure-specific to make robust here
+  (frame-line detection works on clean single-column panels but degrades on irregular grids). So the
+  pre-pass **never marks raster pages authoritative** — they stay a lower-confidence hint + a
+  "digitise visually" flag for the LLM. Reliable per-series raster counts remain future work.
 - **Calibration:** `fit_axis` (linear/log auto-select) is done and unit-tested. Auto-reading tick
   *values* from chars is brittle on multi-panel figures, so it gracefully returns `calibration=None`
   + a warning and relies on the LLM-supplied tick seam (§3) — as the plan intended.

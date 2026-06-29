@@ -15,7 +15,7 @@ import config
 from validation import checks
 from validation.report import QAReport
 
-from . import anthropic_client, parse_output, prompt_loader
+from . import anthropic_client, curve_prepass, parse_output, prompt_loader
 
 
 @dataclass
@@ -28,6 +28,8 @@ class ExtractionResult:
     model: str
     raw_response: str
     coercion_failures: int
+    curve_analysis: str = ""          # the injected deterministic pre-pass block
+    deterministic_counts: list[int] = None  # authoritative per-series marker counts
 
 
 def extract_paper(
@@ -41,7 +43,19 @@ def extract_paper(
     bundle = prompt_loader.load_prompt(prompt_version)
     model = model or config.EXTRACTION_MODEL
 
-    raw = anthropic_client.extract(bundle.text, pdf_bytes, model=model)
+    # Deterministic pre-pass: count markers from the PDF's own vector geometry and
+    # inject the result as a grounding anchor (plan §6). Pure / no API; a failure
+    # here must never block the extraction, so it degrades to "no anchor".
+    try:
+        prepass = curve_prepass.analyze(pdf_bytes)
+        analysis_block = prepass.to_prompt_block()
+        deterministic_counts = prepass.authoritative_counts
+    except Exception:
+        analysis_block, deterministic_counts = "", []
+
+    raw = anthropic_client.extract(
+        bundle.text, pdf_bytes, model=model, analysis_block=analysis_block or None
+    )
     parsed = parse_output.parse(raw)
 
     report = checks.run(
@@ -49,6 +63,7 @@ def extract_paper(
         parsed.text_endpoints,
         figure_is_curve=figure_is_curve,
         coercion_failures=parsed.coercion_failures,
+        deterministic_counts=deterministic_counts,
     )
 
     return ExtractionResult(
@@ -60,4 +75,6 @@ def extract_paper(
         model=model,
         raw_response=parsed.raw_text,
         coercion_failures=parsed.coercion_failures,
+        curve_analysis=analysis_block,
+        deterministic_counts=deterministic_counts,
     )

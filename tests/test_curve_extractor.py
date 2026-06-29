@@ -108,6 +108,30 @@ def test_classify_blob_shape_filled_vs_stroked():
     assert raster.classify_blob_shape(stroked)[0] == "stroked"
 
 
+def test_is_marker_shaped_rejects_lines_and_oversized():
+    assert raster._is_marker_shaped({"bbox_w": 10, "bbox_h": 11})       # square-ish marker
+    assert not raster._is_marker_shaped({"bbox_w": 4, "bbox_h": 40})    # line fragment
+    assert not raster._is_marker_shaped({"bbox_w": 40, "bbox_h": 40})   # oversized merge
+    assert not raster._is_marker_shaped({"bbox_w": 3, "bbox_h": 3})     # speckle
+
+
+def test_remove_text_rows_drops_dense_row_keeps_sparse_curve():
+    # A dense, tightly-spaced horizontal run (axis-label/legend text).
+    text = [{"cx": 100 + 20 * i, "cy": 500.0} for i in range(10)]
+    # A few well-separated markers along a flatter curve stretch — must survive.
+    curve = [{"cx": 100 + 120 * i, "cy": 200.0} for i in range(4)]
+    kept, n_text = raster._remove_text_rows(text + curve)
+    assert n_text == len(text)
+    assert all(b in kept for b in curve)
+    assert not any(b in kept for b in text)
+
+
+def test_remove_text_rows_noop_on_scattered_markers():
+    blobs = [{"cx": 10.0 * i, "cy": 10.0 * i} for i in range(12)]  # diagonal, no row
+    kept, n_text = raster._remove_text_rows(blobs)
+    assert n_text == 0 and len(kept) == len(blobs)
+
+
 # --- integration (real PDF, skipped if absent) ------------------------------ #
 
 _SWAIN = Path("data/incoming/b5a26fd1b0a4575e614a7228ddc04c760ddfc556c57d2b3302ec1031116693d9.pdf")

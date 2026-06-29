@@ -26,7 +26,7 @@ PROMPTS_DIR = ROOT / "prompts"
 # --- Settings (with sensible local-demo defaults) --------------------------
 REQUIRE_PASSWORD = os.getenv("REQUIRE_PASSWORD", "false").strip().lower() == "true"
 WRITE_PASSWORD = os.getenv("WRITE_PASSWORD", "")
-EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v5.2")
+EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v6")
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-opus-4-8")
 
 

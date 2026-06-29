@@ -26,6 +26,20 @@ _MIN_BLOB_PX = 12              # smaller = text speckle / noise
 _MAX_BLOB_PX = 600             # larger = merged line/frame, not a single marker
 _OPEN_ITERS = 1                # erosion iterations to break thin lines off markers
 
+# A data marker has a roughly square, modest-sized bounding box; connecting-line
+# fragments are elongated and most text characters are taller-than-wide or part of
+# a tight horizontal run. These two filters cut the bulk of the contamination that
+# blob detection alone leaves (validated on Quinn Fig. 2: 826 raw -> ~300 -> ~184).
+_MARKER_MIN_SIDE = 6
+_MARKER_MAX_SIDE = 26
+_MARKER_ASPECT_LO = 0.55
+_MARKER_ASPECT_HI = 1.8
+# Text-row removal (conservative): a horizontal run of many tightly-spaced,
+# similar blobs is an axis-label / legend / title row, not data.
+_TEXTROW_Y_TOL = 8
+_TEXTROW_MIN_BLOBS = 8
+_TEXTROW_MAX_MEDIAN_GAP = 36
+
 
 def render_region(page, bbox, dpi: int = _RENDER_DPI) -> np.ndarray:
     """Render `bbox` (pdf points) of `page` to a grayscale numpy array."""
@@ -73,6 +87,43 @@ def detect_blobs(arr: np.ndarray) -> list[dict]:
     return blobs
 
 
+def _is_marker_shaped(b: dict) -> bool:
+    """Square-ish, modest-sized bbox — rejects line fragments and oversized merges."""
+    w, h = b["bbox_w"], b["bbox_h"]
+    if not (_MARKER_MIN_SIDE <= w <= _MARKER_MAX_SIDE and _MARKER_MIN_SIDE <= h <= _MARKER_MAX_SIDE):
+        return False
+    aspect = w / h if h else 1.0
+    return _MARKER_ASPECT_LO <= aspect <= _MARKER_ASPECT_HI
+
+
+def _remove_text_rows(blobs: list[dict]) -> tuple[list[dict], int]:
+    """Drop blobs that sit in a dense horizontal run (axis labels / legend / title).
+
+    Conservative: requires many (>= _TEXTROW_MIN_BLOBS) tightly-spaced blobs sharing
+    a y-baseline, so a sparse near-horizontal stretch of real curve points (a few
+    markers, wider spacing) is preserved.
+    """
+    if not blobs:
+        return blobs, 0
+    order = sorted(range(len(blobs)), key=lambda i: blobs[i]["cy"])
+    rows: list[list[int]] = [[order[0]]]
+    for i in order[1:]:
+        if blobs[i]["cy"] - blobs[rows[-1][-1]]["cy"] <= _TEXTROW_Y_TOL:
+            rows[-1].append(i)
+        else:
+            rows.append([i])
+    text_idx: set[int] = set()
+    for r in rows:
+        if len(r) < _TEXTROW_MIN_BLOBS:
+            continue
+        xs = sorted(blobs[i]["cx"] for i in r)
+        gaps = np.diff(xs)
+        if len(gaps) and float(np.median(gaps)) < _TEXTROW_MAX_MEDIAN_GAP:
+            text_idx.update(r)
+    kept = [b for i, b in enumerate(blobs) if i not in text_idx]
+    return kept, len(text_idx)
+
+
 def classify_blob_shape(blob: dict) -> tuple[str, str]:
     """Coarse (marker_type, shape) from blob geometry.
 
@@ -91,23 +142,36 @@ def classify_blob_shape(blob: dict) -> tuple[str, str]:
 
 
 def detect_markers(page, bbox, dpi: int = _RENDER_DPI) -> tuple[list[MarkerRecord], list[str]]:
-    """Full raster detection for one figure region. Returns (markers, warnings)."""
+    """Best-effort raster marker detection for one figure region.
+
+    Returns (markers, warnings). The count is an ESTIMATE — monochrome shape coding
+    in a multi-panel figure with baked-in text is the hardest case, so callers must
+    treat the result as a lower-confidence hint (the pre-pass never marks raster
+    pages authoritative) and the warnings flag it for manual digitisation.
+    """
     arr = render_region(page, bbox, dpi)
-    blobs = detect_blobs(arr)
+    raw = detect_blobs(arr)
     warnings: list[str] = []
-    if not blobs:
+    if not raw:
         return [], ["raster: no marker-scale blobs found after line suppression"]
 
+    shaped = [b for b in raw if _is_marker_shaped(b)]
+    kept, n_text = _remove_text_rows(shaped)
+
     records = []
-    for b in blobs:
+    for b in kept:
         mtype, shape = classify_blob_shape(b)
         records.append(MarkerRecord(group_key=shape, marker_type=mtype,
                                     pixel_x=b["cx"], pixel_y=b["cy"]))
 
-    n_amb = sum(1 for b in blobs if classify_blob_shape(b)[1] == "ambiguous")
-    if n_amb > 0.3 * len(blobs):
+    warnings.append(
+        f"raster: ESTIMATE only — {len(raw)} raw blobs → {len(shaped)} marker-shaped "
+        f"→ {len(kept)} after removing {n_text} text-row blobs. Multi-panel monochrome "
+        "raster; verify counts by visual digitisation."
+    )
+    n_amb = sum(1 for b in kept if classify_blob_shape(b)[1] == "ambiguous")
+    if kept and n_amb > 0.3 * len(kept):
         warnings.append(
-            f"raster: {n_amb}/{len(blobs)} blobs ambiguous shape — monochrome "
-            "shape coding at this resolution is low-confidence; review required."
+            f"raster: {n_amb}/{len(kept)} kept blobs ambiguous shape — low-confidence."
         )
     return records, warnings

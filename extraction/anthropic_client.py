@@ -31,8 +31,31 @@ _USER_INSTRUCTION = (
 )
 
 
-def extract(prompt_text: str, pdf_bytes: bytes, *, model: str | None = None) -> str:
-    """Run one extraction. Returns the concatenated text of the model response."""
+def _build_user_content(file_id: str, analysis_block: str | None) -> list[dict]:
+    content: list[dict] = [
+        {"type": "document", "source": {"type": "file", "file_id": file_id}},
+        {"type": "container_upload", "file_id": file_id},
+    ]
+    # Inject the deterministic curve pre-pass (plan §6) before the instruction so
+    # the model treats the authoritative marker counts as a grounding anchor.
+    if analysis_block:
+        content.append({"type": "text", "text": analysis_block})
+    content.append({"type": "text", "text": _USER_INSTRUCTION})
+    return content
+
+
+def extract(
+    prompt_text: str,
+    pdf_bytes: bytes,
+    *,
+    model: str | None = None,
+    analysis_block: str | None = None,
+) -> str:
+    """Run one extraction. Returns the concatenated text of the model response.
+
+    `analysis_block` is the optional deterministic curve pre-pass text
+    (extraction/curve_prepass.py) injected into the user turn as a count anchor.
+    """
     model = model or config.EXTRACTION_MODEL
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
@@ -55,17 +78,7 @@ def extract(prompt_text: str, pdf_bytes: bytes, *, model: str | None = None) -> 
             betas=_BETAS,
             tools=[_CODE_EXECUTION_TOOL],
             messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {"type": "file", "file_id": uploaded.id},
-                        },
-                        {"type": "container_upload", "file_id": uploaded.id},
-                        {"type": "text", "text": _USER_INSTRUCTION},
-                    ],
-                }
+                {"role": "user", "content": _build_user_content(uploaded.id, analysis_block)}
             ],
         ) as stream:
             message = stream.get_final_message()
