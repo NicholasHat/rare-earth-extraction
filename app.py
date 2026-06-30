@@ -9,6 +9,8 @@ come later; the schema and master DB they read from are built here.
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import streamlit as st
 
@@ -16,16 +18,99 @@ import auth
 import config
 from database import connection, merge
 from extraction import runner
+from extraction.runner import ExtractionResult
 from extraction.parse_output import ParseError
 from extraction.prompt_loader import PromptNotReadyError
 from ingestion import dedup, doi as doi_mod, pdf_inspect, upload
 from validation import schema
-from validation.report import Severity
+from validation.report import QAReport, Severity
 
 st.set_page_config(page_title="REE Extraction Dashboard", layout="wide")
 
 # Ensure the data dir + schema exist before anything reads the DB.
 connection.init_db()
+
+
+# --------------------------------------------------------------------------- #
+# Staging persistence (survive server restarts / idle timeouts)
+# --------------------------------------------------------------------------- #
+
+def _meta_path(sha: str):
+    return config.STAGING_DIR / f"{sha}.meta.json"
+
+
+def _staging_path(sha: str):
+    return config.STAGING_DIR / f"{sha}.xlsx"
+
+
+def _save_staging_meta(sha: str, stash: dict, result: ExtractionResult) -> None:
+    """Write a JSON sidecar so the review queue can be restored after a restart."""
+    payload = {
+        "sha": sha,
+        "pdf_path": stash["pdf_path"],
+        "doi": stash["doi"],
+        "filename": stash["filename"],
+        "meta": stash["meta"],
+        "prompt_version": result.prompt_version,
+        "prompt_sha256": result.prompt_sha256,
+        "model": result.model,
+        "raw_response": result.raw_response,
+        "coercion_failures": result.coercion_failures,
+        "curve_analysis": result.curve_analysis,
+        "deterministic_counts": result.deterministic_counts,
+        "qa_report_json": result.qa_report.to_json(),
+        "text_endpoints": result.text_endpoints,
+    }
+    _meta_path(sha).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _delete_staging_files(sha: str) -> None:
+    for p in (_meta_path(sha), _staging_path(sha)):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _restore_staging_queue() -> None:
+    """On first load, reload any unreviewed staging items from disk into session state."""
+    if st.session_state.get("_staging_restored"):
+        return
+    st.session_state["_staging_restored"] = True
+    pending = st.session_state.setdefault("pending", {})
+    for meta_file in config.STAGING_DIR.glob("*.meta.json"):
+        sha = meta_file.name.removesuffix(".meta.json")
+        if sha in pending:
+            continue
+        xlsx = _staging_path(sha)
+        if not xlsx.exists():
+            meta_file.unlink(missing_ok=True)
+            continue
+        try:
+            payload = json.loads(meta_file.read_text(encoding="utf-8"))
+            df = pd.read_excel(xlsx, engine="openpyxl")
+            result = ExtractionResult(
+                df=df,
+                text_endpoints=payload["text_endpoints"],
+                qa_report=QAReport.from_json(payload["qa_report_json"]),
+                prompt_version=payload["prompt_version"],
+                prompt_sha256=payload["prompt_sha256"],
+                model=payload["model"],
+                raw_response=payload.get("raw_response"),
+                coercion_failures=payload.get("coercion_failures", 0),
+                curve_analysis=payload.get("curve_analysis", ""),
+                deterministic_counts=payload.get("deterministic_counts"),
+            )
+            pending[sha] = {
+                "sha": sha,
+                "pdf_path": payload["pdf_path"],
+                "doi": payload["doi"],
+                "filename": payload["filename"],
+                "meta": payload["meta"],
+                "result": result,
+            }
+        except Exception:
+            pass  # corrupt sidecar — skip silently
 
 
 # --------------------------------------------------------------------------- #
@@ -81,16 +166,18 @@ def _run_batch(selected: list[dict], figure_is_curve: bool) -> None:
             except Exception as e:  # API/auth/etc. — record and keep going
                 errors.append((p["filename"], f"Extraction failed: {e}"))
                 continue
-        staging_path = config.STAGING_DIR / f"{p['sha']}.xlsx"
-        result.df.to_excel(staging_path, index=False, engine="openpyxl")
-        pending[p["sha"]] = {
-            "sha": p["sha"],
+        sha = p["sha"]
+        result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
+        stash = {
+            "sha": sha,
             "pdf_path": p["pdf_path"],
             "doi": p["doi"],
             "meta": p["meta"],
             "filename": p["filename"],
             "result": result,
         }
+        _save_staging_meta(sha, stash, result)
+        pending[sha] = stash
     n_ok = len(selected) - len(errors)
     if n_ok:
         st.success(f"Extracted {n_ok}/{len(selected)} paper(s) — ready for review below.")
@@ -179,10 +266,12 @@ def render_review_queue() -> None:
             f"prompt_run_id={summary['prompt_run_id']}. Export: {export_path.name}"
         )
         pending.pop(sha, None)
+        _delete_staging_files(sha)
         st.rerun()
 
     if col_b.button("🗑️ Reject", key=f"reject_{sha}"):
         pending.pop(sha, None)
+        _delete_staging_files(sha)
         st.info(f"{stash['filename']} rejected and discarded (nothing written to the master DB).")
         st.rerun()
 
@@ -191,6 +280,7 @@ def render_review_queue() -> None:
 # Main flow
 # --------------------------------------------------------------------------- #
 def main() -> None:
+    _restore_staging_queue()
     st.title("REE Extraction Dashboard")
     st.caption("Phase A2 — batch PDF upload → 26-column tables → review → merge")
 

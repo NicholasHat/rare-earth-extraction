@@ -28,6 +28,7 @@ REQUIRE_PASSWORD = os.getenv("REQUIRE_PASSWORD", "false").strip().lower() == "tr
 WRITE_PASSWORD = os.getenv("WRITE_PASSWORD", "")
 EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v6")
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-opus-4-8")
+ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
 
 
 def ensure_dirs() -> None:

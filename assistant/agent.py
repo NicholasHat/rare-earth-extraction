@@ -105,7 +105,7 @@ def run_turn(history: list[dict], user_message: str, *, model: str | None = None
     messages = [*history, {"role": "user", "content": user_message}]
 
     runner = client.beta.messages.tool_runner(
-        model=model or config.EXTRACTION_MODEL,
+        model=model or config.ASSISTANT_MODEL,
         max_tokens=_MAX_TOKENS,
         max_iterations=_MAX_ITERATIONS,
         system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
