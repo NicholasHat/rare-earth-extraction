@@ -63,7 +63,17 @@ def _build_user_content(file_id: str, analysis_block: str | None) -> list[dict]:
     # the model treats the authoritative marker counts as a grounding anchor.
     if analysis_block:
         content.append({"type": "text", "text": analysis_block})
-    content.append({"type": "text", "text": _USER_INSTRUCTION})
+    # Cache breakpoint: the code-execution tool loop re-sends this whole turn
+    # (system prompt + this paper's PDF) on every internal iteration. Without
+    # this marker only the system prompt is cached (its own breakpoint above)
+    # and the PDF gets rebilled at full price on every iteration; with it, the
+    # PDF is written to cache once and read back cheaply on every iteration
+    # after the first (see prompts/CHANGELOG.md, extraction_v7).
+    content.append({
+        "type": "text",
+        "text": _USER_INSTRUCTION,
+        "cache_control": {"type": "ephemeral"},
+    })
     return content
 
 
