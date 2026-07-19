@@ -10,10 +10,19 @@ the PDF uploaded once via the Files API first.
 Two ways to run an extraction, sharing the same request shape (_message_kwargs):
   - `extract()` — synchronous, streamed (a fully-digitized multi-element,
     multi-figure extraction plus the code-execution transcript is a large
-    output; non-streaming would risk the SDK's HTTP timeout).
+    output; non-streaming would risk the SDK's HTTP timeout). Automatically
+    resumes through `stop_reason="pause_turn"` (the server-side code-execution
+    loop's default 10-internal-iteration cap) by re-sending the assistant's
+    own partial response, per the documented continuation pattern — a rich
+    multi-element paper can legitimately need more than 10 iterations.
   - `submit_batch()` / `poll_batch_status()` / `collect_batch_results()` — the
-    Message Batches API, 50% cheaper and asynchronous. See the flag on that
-    section below before relying on it for a full run.
+    Message Batches API, 50% cheaper and asynchronous. Has no round trip to
+    continue a paused batch item, so a `pause_turn` result there surfaces as
+    a clear error instead. See the flag on that section below before relying
+    on it for a full run.
+
+A `stop_reason` of `max_tokens` or `refusal` is always a hard failure (surfaced
+as a specific RuntimeError, not a bare parse error) — see `_check_stop_reason`.
 """
 from __future__ import annotations
 
@@ -46,6 +55,26 @@ def _usage_from_message(message) -> tuple[int, int, int, int]:
         getattr(u, "cache_creation_input_tokens", None) or 0,
         getattr(u, "cache_read_input_tokens", None) or 0,
     )
+
+
+def _check_stop_reason(stop_reason: str, *, can_continue: bool = False) -> None:
+    """Raise a specific, actionable error for a non-finished response instead of
+    letting truncated/declined output fall through to an opaque JSON parse
+    failure downstream."""
+    if stop_reason == "refusal":
+        raise RuntimeError("model declined the request (stop_reason=refusal)")
+    if stop_reason == "max_tokens":
+        raise RuntimeError(
+            "model output was truncated at max_tokens (128000) before finishing — "
+            "the paper likely needs more figures/elements digitized than fit in one "
+            "turn's output"
+        )
+    if stop_reason == "pause_turn" and not can_continue:
+        raise RuntimeError(
+            "server-side tool loop paused (stop_reason=pause_turn) with no automatic "
+            "continuation available here — this paper needs more internal tool "
+            "iterations than one turn allows"
+        )
 
 # A short instruction in the user turn; the real rules live in the system prompt.
 _USER_INSTRUCTION = (
@@ -113,6 +142,7 @@ def _message_kwargs(prompt_text: str, file_id: str, *, model: str, analysis_bloc
 
 
 def _response_from_message(message) -> ExtractResponse:
+    _check_stop_reason(message.stop_reason)
     text = "\n".join(block.text for block in message.content if block.type == "text").strip()
     input_tokens, output_tokens, cache_creation, cache_read = _usage_from_message(message)
     return ExtractResponse(
@@ -121,6 +151,65 @@ def _response_from_message(message) -> ExtractResponse:
         output_tokens=output_tokens,
         cache_creation_input_tokens=cache_creation,
         cache_read_input_tokens=cache_read,
+    )
+
+
+def _response_from_message_chain(messages: list) -> ExtractResponse:
+    """Like _response_from_message, but for a chain of pause_turn continuations:
+    only the final message carries finished output, but every message in the
+    chain is a separately billed API call, so usage is summed across all of
+    them."""
+    _check_stop_reason(messages[-1].stop_reason)
+    text = "\n".join(
+        block.text for block in messages[-1].content if block.type == "text"
+    ).strip()
+    input_tokens = output_tokens = cache_creation = cache_read = 0
+    for m in messages:
+        it, ot, cc, cr = _usage_from_message(m)
+        input_tokens += it
+        output_tokens += ot
+        cache_creation += cc
+        cache_read += cr
+    return ExtractResponse(
+        text=text,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
+    )
+
+
+# Server-side tool loops (code execution) pause with stop_reason="pause_turn"
+# after a default 10 internal iterations. Bound how many times we resend and
+# let it resume — a rich multi-element paper can legitimately need several
+# rounds of this; an unbounded loop would not.
+_MAX_CONTINUATIONS = 5
+
+
+def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict) -> list:
+    """Run one extraction call, automatically resuming through pause_turn by
+    re-sending the assistant's own (cumulative) partial response — the
+    documented continuation pattern for the server-side tool loop's iteration
+    cap. Returns every message in the chain (usually just one)."""
+    user_content = kwargs["messages"][0]["content"]
+    messages = kwargs["messages"]
+    chain = []
+
+    for _ in range(_MAX_CONTINUATIONS + 1):
+        with client.beta.messages.stream(betas=_BETAS, **{**kwargs, "messages": messages}) as stream:
+            message = stream.get_final_message()
+        chain.append(message)
+        if message.stop_reason != "pause_turn":
+            return chain
+        messages = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": message.content},
+        ]
+
+    raise RuntimeError(
+        f"extraction did not finish after {_MAX_CONTINUATIONS} pause_turn continuations "
+        "(the server-side tool loop kept pausing) — this paper may need more figures/"
+        "elements digitized than this pipeline currently handles in one run"
     )
 
 
@@ -143,12 +232,11 @@ def extract(
     uploaded = client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf"))
     try:
         kwargs = _message_kwargs(prompt_text, uploaded.id, model=model, analysis_block=analysis_block)
-        with client.beta.messages.stream(betas=_BETAS, **kwargs) as stream:
-            message = stream.get_final_message()
+        chain = _run_with_continuations(client, kwargs)
     finally:
         client.beta.files.delete(uploaded.id)
 
-    return _response_from_message(message)
+    return _response_from_message_chain(chain)
 
 
 # --------------------------------------------------------------------------- #
@@ -209,12 +297,17 @@ def collect_batch_results(batch_id: str) -> dict[str, ExtractResponse | Exceptio
     client = anthropic.Anthropic()
     out: dict[str, ExtractResponse | Exception] = {}
     for result in client.beta.messages.batches.results(batch_id):
-        if result.result.type == "succeeded":
-            out[result.custom_id] = _response_from_message(result.result.message)
-        else:
+        if result.result.type != "succeeded":
             out[result.custom_id] = RuntimeError(
                 f"batch item {result.custom_id!r} did not succeed: {result.result.type}"
             )
+            continue
+        try:
+            out[result.custom_id] = _response_from_message(result.result.message)
+        except RuntimeError as e:
+            # e.g. stop_reason=pause_turn — the Batches API has no round trip
+            # to continue a paused server-side tool loop, unlike extract().
+            out[result.custom_id] = e
     return out
 
 
