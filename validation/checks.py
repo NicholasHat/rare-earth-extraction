@@ -102,6 +102,36 @@ def _element_groups(df: pd.DataFrame):
         yield str(label), sub
 
 
+# Columns besides a varied x-axis that define which experiment a row belongs
+# to. The prompt combines every experiment in the paper into one flat `rows`
+# list (extraction_v5.1+ OUTPUT CONTRACT rule "one combined rows list across
+# all experiments") — a paper commonly reports a *second* experiment for the
+# same element (e.g. a concentration sweep at fixed pH) alongside the primary
+# one (e.g. a pH sweep at fixed concentration). Grouping by element alone
+# pools both together, corrupting any check of one curve's shape.
+_CURVE_KEY_COLUMNS = [
+    "Extractant Conc. (mM)",
+    "Extract Temperature (oC)",
+    "Acid Solution conc. (M)",
+    "Leaching time (minute)",
+    "Stripping Temperature (oC)",
+]
+
+
+def _curve_groups(df: pd.DataFrame):
+    """Yield (element_label, sub_df) per distinct curve: same element AND the
+    same fixed experimental conditions, so two different experiments for the
+    same element are never pooled into one curve."""
+    if ELEMENT_COLUMN not in df.columns:
+        return
+    key_cols = [ELEMENT_COLUMN] + [c for c in _CURVE_KEY_COLUMNS if c in df.columns]
+    grouped = df.copy()
+    grouped[ELEMENT_COLUMN] = grouped[ELEMENT_COLUMN].fillna("(unspecified)")
+    for key, sub in grouped.groupby(key_cols, dropna=False):
+        label = key[0] if isinstance(key, tuple) else key
+        yield str(label), sub
+
+
 def _row_count_sanity(df: pd.DataFrame, figure_is_curve: bool, report: QAReport) -> None:
     if not figure_is_curve:
         return
@@ -177,7 +207,7 @@ def _axis_bounds(df: pd.DataFrame, report: QAReport) -> None:
 def _monotonicity(df: pd.DataFrame, report: QAReport) -> None:
     if "pH" not in df.columns or "Extract%" not in df.columns:
         return
-    for label, sub in _element_groups(df):
+    for label, sub in _curve_groups(df):
         s = sub[["pH", "Extract%"]].apply(pd.to_numeric, errors="coerce").dropna()
         if len(s) < 4:
             continue
@@ -252,10 +282,9 @@ def _text_endpoint_cross_check(
             continue
         xs, ys = xs[valid], ys[valid]
 
-        # Nearest digitized point at the stated x.
-        nearest_idx = (xs - float(x_val)).abs().idxmin()
-        x_near, y_near = xs.loc[nearest_idx], ys.loc[nearest_idx]
-        if abs(x_near - float(x_val)) > PH_TOL and x_col == "pH":
+        x_dist = (xs - float(x_val)).abs()
+        nearest_x = xs.loc[x_dist.idxmin()]
+        if x_dist.min() > PH_TOL and x_col == "pH":
             # No digitized point near the stated x at all — the curve may not
             # reach the paper's stated endpoint.
             report.add(
@@ -263,9 +292,19 @@ def _text_endpoint_cross_check(
                 Severity.RED,
                 f"Paper states {y_col} {y_val} at {x_col} {x_val} for "
                 f"'{element}', but no digitized point is within {PH_TOL} of "
-                f"{x_col}={x_val} (nearest is {x_near:g}). Possible truncated curve.",
+                f"{x_col}={x_val} (nearest is {nearest_x:g}). Possible truncated curve.",
             )
             continue
+
+        # Several rows can legitimately share the same (or nearly the same) x —
+        # e.g. a paper's separate concentration-sweep experiment holds pH fixed
+        # while %E varies with concentration, so "nearest x" alone can land on
+        # an unrelated point from a different experiment. Among every row
+        # within tolerance of the stated x, the one whose y best matches the
+        # stated y is the real match.
+        candidates = x_dist <= (PH_TOL if x_col == "pH" else x_dist.min())
+        best_idx = (ys[candidates] - float(y_val)).abs().idxmin()
+        y_near = ys.loc[best_idx]
         if abs(y_near - float(y_val)) > PCT_TOL:
             report.add(
                 "text_endpoint_cross_check",

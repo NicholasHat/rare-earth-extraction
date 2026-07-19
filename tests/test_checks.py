@@ -89,3 +89,48 @@ def test_empty_extraction_is_red():
     report = checks.run(_df([]), [], figure_is_curve=True)
     assert not report.passed
     assert any(f.check == "schema_conformance" for f in report.reds)
+
+
+def _two_experiment_rows(element="Nd"):
+    """A pH-sweep experiment (Extractant Conc. fixed at 500) plus a second,
+    separate concentration-sweep experiment for the same element (pH fixed
+    at 1.75) — the OUTPUT CONTRACT combines every experiment into one flat
+    `rows` list, so both legitimately share the element column."""
+    ph_sweep = [
+        {EL: element, "pH": 0.87 + 0.15 * i, "Extract%": min(99.0, 2.0 + 6.0 * i),
+         "Extractant Conc. (mM)": 500.0}
+        for i in range(14)
+    ]
+    conc_sweep = [
+        {EL: element, "pH": 1.75, "Extract%": pct, "Extractant Conc. (mM)": conc}
+        for conc, pct in [(50, 0.24), (100, 25.66), (250, 7.38), (500, 14.1), (1000, 26.92)]
+    ]
+    return ph_sweep + conc_sweep
+
+
+def test_monotonicity_does_not_pool_a_second_experiment():
+    # The conc-sweep block alone (all at pH=1.75, %E jumping 0.24->26.92) would
+    # look wildly non-monotonic if pooled with the pH-sweep by element alone.
+    report = checks.run(_df(_two_experiment_rows()), [], figure_is_curve=True)
+    assert not any(f.check == "monotonicity" for f in report.flags)
+
+
+def test_text_endpoint_cross_check_picks_matching_experiment_not_nearest_tie():
+    # Five conc-sweep rows all share pH=1.75 exactly (a tie on x-distance).
+    # The paper's stated point (Extract% 14.02 at pH 1.75) matches the
+    # Extractant Conc.=500 row (14.1) — not the Conc.=50 row (0.24), which an
+    # arbitrary "first nearest x" tie-break would previously have picked.
+    endpoints = [
+        {"element": "Nd", "x_value": 1.75, "x_basis": "pH", "y_value": 14.02, "y_metric": "Extract%"}
+    ]
+    report = checks.run(_df(_two_experiment_rows()), endpoints, figure_is_curve=True)
+    assert not any(f.check == "text_endpoint_cross_check" for f in report.reds)
+
+
+def test_text_endpoint_cross_check_still_flags_a_real_mismatch():
+    # None of the candidate rows at pH=1.75 comes anywhere near a claimed 60%.
+    endpoints = [
+        {"element": "Nd", "x_value": 1.75, "x_basis": "pH", "y_value": 60.0, "y_metric": "Extract%"}
+    ]
+    report = checks.run(_df(_two_experiment_rows()), endpoints, figure_is_curve=True)
+    assert any(f.check == "text_endpoint_cross_check" for f in report.reds)
