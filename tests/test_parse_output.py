@@ -44,3 +44,30 @@ def test_raises_when_no_json():
 
     with pytest.raises(parse_output.ParseError):
         parse_output.parse("the model said nothing useful")
+
+
+def test_parses_compact_positional_rows():
+    raw = """```json
+{
+  "columns": ["Rare Earth Elements (REY:La, Ce, Nd)", "pH", "Extract%"],
+  "rows": [
+    ["Yb", 1.5, 12.0],
+    ["Yb", 2.0, 30.0]
+  ],
+  "text_endpoints": []
+}
+```"""
+    parsed = parse_output.parse(raw)
+    assert len(parsed.df) == 2
+    assert list(parsed.df.columns) == parse_output.schema.COLUMNS
+    assert parsed.df["pH"].tolist() == [1.5, 2.0]
+    assert parsed.df["Extract%"].tolist() == [12.0, 30.0]
+    assert parsed.coercion_failures == 0
+
+
+def test_positional_rows_without_columns_raises():
+    import pytest
+
+    raw = '{"rows": [["Yb", 1.5, 12.0]], "text_endpoints": []}'
+    with pytest.raises(parse_output.ParseError):
+        parse_output.parse(raw)

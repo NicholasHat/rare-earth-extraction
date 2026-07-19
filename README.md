@@ -148,7 +148,7 @@ deterministic curve pre-pass, and the assistant's tools.
 
 **Building next**
 
-- [ ] **Live validation of `extraction_v6`** against a real corpus, and tuning
+- [ ] **Live validation of `extraction_v7`** against a real corpus, and tuning
       the QA tolerances (text-endpoint %E / pH thresholds) on the first dozen papers
 - [ ] **Reliable per-series counts on raster figures** — the vector path is
       ground truth today; the raster CV path is still a lower-confidence estimate

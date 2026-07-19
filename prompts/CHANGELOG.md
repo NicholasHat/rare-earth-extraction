@@ -4,7 +4,23 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v6 — deterministic curve pre-pass anchor (current pinned default)
+## extraction_v7 — compact positional output format (current pinned default)
+- The OUTPUT CONTRACT's `rows` shape changes from a list of objects (each row
+  repeating all 26 verbose column-name keys, e.g.
+  `"Rare Earth Elements (REY:La, Ce, Nd)"`) to a positional form: a top-level
+  `columns` array (the 26 names, written once) plus `rows` as arrays of 26
+  values, index-aligned to `columns`. A typical 90-row extraction was paying
+  for ~26 keys × 90 rows of output tokens purely on key repetition; this cuts
+  that to 26 keys total. `extraction/parse_output.py` accepts both shapes, so
+  older `prompt_runs.raw_response` records still replay correctly.
+- Core extraction behaviour (Steps 0–10) is unchanged from v6.
+- Paired with two request-level changes in `extraction/anthropic_client.py`
+  (not prompt changes, so no new prompt version needed for them): a cache
+  breakpoint on the user turn so the PDF is reused (not rebilled) across the
+  model's internal code-execution iterations, and a `task_budget` backstop
+  bounding total spend per extraction call.
+
+## extraction_v6 — deterministic curve pre-pass anchor
 - A deterministic pass (`extraction/curve_prepass.py`, using the vector curve
   extractor) runs BEFORE the model call and injects a "DETERMINISTIC CURVE
   ANALYSIS" block into the user turn: authoritative per-series marker counts for

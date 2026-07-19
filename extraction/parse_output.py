@@ -1,9 +1,14 @@
 """Parse the model's raw response into a (DataFrame, text_endpoints) pair.
 
-The OUTPUT CONTRACT (prompts/extraction_v5.1.md) asks for a single JSON object
-with `rows` and `text_endpoints`. This parser is deliberately tolerant: it pulls
-the JSON out of a ```json fenced block when present, else falls back to the
-outermost {...} span, so a stray sentence around the block doesn't break the run.
+The OUTPUT CONTRACT asks for a single JSON object with `rows` and
+`text_endpoints`. Two `rows` shapes are supported:
+  - extraction_v5.1–v6: a list of objects, one per row, keyed by column name.
+  - extraction_v7+: a compact positional form — a top-level `columns` list of
+    the 26 column names plus `rows` as a list of same-length value arrays —
+    to avoid paying output tokens for 26 verbose keys on every single row.
+This parser is deliberately tolerant: it pulls the JSON out of a ```json
+fenced block when present, else falls back to the outermost {...} span, so a
+stray sentence around the block doesn't break the run.
 """
 from __future__ import annotations
 
@@ -63,11 +68,20 @@ def _count_coercion_failures(raw_rows: list[dict]) -> int:
     return failures
 
 
+def _expand_positional_rows(columns: object, rows: list) -> list[dict]:
+    """extraction_v7+ compact form: {"columns": [...], "rows": [[v0, v1, ...], ...]}."""
+    if not isinstance(columns, list):
+        raise ParseError("array-shaped 'rows' requires a top-level 'columns' list")
+    return [dict(zip(columns, row)) for row in rows if isinstance(row, list)]
+
+
 def parse(raw_text: str) -> ParsedExtraction:
     obj = _extract_json_object(raw_text)
     raw_rows = obj.get("rows") or []
     if not isinstance(raw_rows, list):
         raise ParseError("'rows' is not a list")
+    if raw_rows and isinstance(raw_rows[0], list):
+        raw_rows = _expand_positional_rows(obj.get("columns"), raw_rows)
     endpoints = obj.get("text_endpoints") or []
     if not isinstance(endpoints, list):
         endpoints = []
