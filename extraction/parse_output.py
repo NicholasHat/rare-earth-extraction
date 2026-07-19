@@ -69,10 +69,38 @@ def _count_coercion_failures(raw_rows: list[dict]) -> int:
 
 
 def _expand_positional_rows(columns: object, rows: list) -> list[dict]:
-    """extraction_v7+ compact form: {"columns": [...], "rows": [[v0, v1, ...], ...]}."""
+    """extraction_v7+ compact form: {"columns": [...], "rows": [[v0, v1, ...], ...]}.
+
+    Validated against the canonical schema before use. Without this, a
+    typo'd/renamed column would silently read as "missing" once
+    schema.coerce_schema matches by exact name — the data isn't dropped by
+    this function, but it's orphaned under the wrong key and coerce_schema
+    nulls it out with no error. A row whose length doesn't match `columns`
+    would silently misalign every value after the gap via zip() truncation.
+    Both are now hard failures instead of silent data loss.
+    """
     if not isinstance(columns, list):
         raise ParseError("array-shaped 'rows' requires a top-level 'columns' list")
-    return [dict(zip(columns, row)) for row in rows if isinstance(row, list)]
+    if set(columns) != set(schema.COLUMNS):
+        missing = sorted(set(schema.COLUMNS) - set(columns))
+        unexpected = sorted(set(columns) - set(schema.COLUMNS))
+        detail = "; ".join(
+            part for part in (
+                f"missing: {missing}" if missing else "",
+                f"unexpected: {unexpected}" if unexpected else "",
+            ) if part
+        )
+        raise ParseError(f"'columns' does not match the 26-column schema ({detail})")
+
+    expanded = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != len(columns):
+            got = len(row) if isinstance(row, list) else type(row).__name__
+            raise ParseError(
+                f"row length {got} does not match 'columns' length {len(columns)}"
+            )
+        expanded.append(dict(zip(columns, row)))
+    return expanded
 
 
 def parse(raw_text: str) -> ParsedExtraction:
