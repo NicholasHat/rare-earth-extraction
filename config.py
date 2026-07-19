@@ -34,7 +34,14 @@ ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
 # spend across its whole code-execution loop — self-moderated by the model,
 # not an enforced ceiling. Guards against the runaway narrated-clustering /
 # repeated-re-render failure mode (prompts/CHANGELOG.md, extraction_v6/v7).
-EXTRACTION_TASK_BUDGET_TOKENS = int(os.getenv("EXTRACTION_TASK_BUDGET_TOKENS", "100000"))
+#
+# 100_000 was too tight: a real multi-element paper (13 REE elements, each a
+# separate digitized curve) hit this ceiling and the model gave up partway
+# through, silently regressing to ~2 points/element (the text endpoints only)
+# instead of fully digitizing each curve. 500_000 is a deliberately generous
+# floor so this only catches genuinely pathological runaway loops, not
+# legitimate rich extractions — tune down once more real-run telemetry exists.
+EXTRACTION_TASK_BUDGET_TOKENS = int(os.getenv("EXTRACTION_TASK_BUDGET_TOKENS", "500000"))
 
 
 def ensure_dirs() -> None:
