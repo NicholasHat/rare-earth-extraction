@@ -60,6 +60,10 @@ def _save_staging_meta(sha: str, stash: dict, result: ExtractionResult) -> None:
         "deterministic_counts": result.deterministic_counts,
         "qa_report_json": result.qa_report.to_json(),
         "text_endpoints": result.text_endpoints,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "cache_creation_input_tokens": result.cache_creation_input_tokens,
+        "cache_read_input_tokens": result.cache_read_input_tokens,
     }
     _meta_path(sha).write_text(json.dumps(payload), encoding="utf-8")
 
@@ -100,6 +104,10 @@ def _restore_staging_queue() -> None:
                 coercion_failures=payload.get("coercion_failures", 0),
                 curve_analysis=payload.get("curve_analysis", ""),
                 deterministic_counts=payload.get("deterministic_counts"),
+                input_tokens=payload.get("input_tokens", 0),
+                output_tokens=payload.get("output_tokens", 0),
+                cache_creation_input_tokens=payload.get("cache_creation_input_tokens", 0),
+                cache_read_input_tokens=payload.get("cache_read_input_tokens", 0),
             )
             pending[sha] = {
                 "sha": sha,
@@ -116,6 +124,15 @@ def _restore_staging_queue() -> None:
 # --------------------------------------------------------------------------- #
 # QA report rendering
 # --------------------------------------------------------------------------- #
+def _format_usage(result: ExtractionResult) -> str:
+    total_in = result.input_tokens + result.cache_creation_input_tokens + result.cache_read_input_tokens
+    cached_pct = f"{100 * result.cache_read_input_tokens / total_in:.0f}%" if total_in else "0%"
+    return (
+        f"{total_in:,} input tokens ({cached_pct} served from cache) · "
+        f"{result.output_tokens:,} output tokens"
+    )
+
+
 def render_qa(report) -> None:
     verdict = report.verdict
     if verdict is Severity.GREEN:
@@ -205,6 +222,7 @@ def render_review_queue() -> None:
     result = stash["result"]
 
     render_qa(result.qa_report)
+    st.caption(_format_usage(result))
 
     st.write(f"**{len(result.df)} rows extracted.** Edit cells below if needed.")
     edited = st.data_editor(result.df, num_rows="dynamic", use_container_width=True, key=f"editor_{sha}")
@@ -255,6 +273,10 @@ def render_review_queue() -> None:
                 is_raster_figure=stash["meta"].get("is_raster_figure"),
                 note=merge_note,
                 override=override,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_creation_input_tokens=result.cache_creation_input_tokens,
+                cache_read_input_tokens=result.cache_read_input_tokens,
             )
         finally:
             conn.close()

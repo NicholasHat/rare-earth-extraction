@@ -30,6 +30,10 @@ class ExtractionResult:
     coercion_failures: int
     curve_analysis: str = ""          # the injected deterministic pre-pass block
     deterministic_counts: list[int] = None  # authoritative per-series marker counts
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0  # high value here confirms the cache breakpoint is working
 
 
 def extract_paper(
@@ -53,10 +57,10 @@ def extract_paper(
     except Exception:
         analysis_block, deterministic_counts = "", []
 
-    raw = anthropic_client.extract(
+    response = anthropic_client.extract(
         bundle.text, pdf_bytes, model=model, analysis_block=analysis_block or None
     )
-    parsed = parse_output.parse(raw)
+    parsed = parse_output.parse(response.text)
 
     report = checks.run(
         parsed.df,
@@ -77,4 +81,8 @@ def extract_paper(
         coercion_failures=parsed.coercion_failures,
         curve_analysis=analysis_block,
         deterministic_counts=deterministic_counts,
+        input_tokens=response.input_tokens,
+        output_tokens=response.output_tokens,
+        cache_creation_input_tokens=response.cache_creation_input_tokens,
+        cache_read_input_tokens=response.cache_read_input_tokens,
     )

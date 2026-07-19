@@ -34,7 +34,14 @@ CREATE TABLE IF NOT EXISTS prompt_runs (
     n_rows_returned  INTEGER,
     qa_passed        INTEGER,               -- 1/0 overall QA verdict
     qa_report_json   TEXT,                  -- serialized QAReport (warnings, flags)
-    raw_response     TEXT                   -- full model output, for audit/replay
+    raw_response     TEXT,                  -- full model output, for audit/replay
+
+    -- Usage/cost telemetry (added post-launch — database.connection adds these
+    -- columns to pre-existing DBs at startup; see _ensure_prompt_run_usage_columns).
+    input_tokens                    INTEGER,
+    output_tokens                   INTEGER,
+    cache_creation_input_tokens     INTEGER,
+    cache_read_input_tokens         INTEGER
 );
 
 -- one approved run per (paper, prompt_version).

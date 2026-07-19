@@ -15,14 +15,19 @@ def insert_prompt_run(
     qa_passed: bool,
     qa_report_json: str,
     raw_response: str | None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
 ) -> int:
     """Record an extraction attempt (status starts 'pending'). Returns prompt_run_id."""
     cur = conn.execute(
         """
         INSERT INTO prompt_runs (
             paper_id, prompt_version, prompt_sha256, model, status,
-            n_rows_returned, qa_passed, qa_report_json, raw_response
-        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+            n_rows_returned, qa_passed, qa_report_json, raw_response,
+            input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             paper_id,
@@ -33,6 +38,10 @@ def insert_prompt_run(
             1 if qa_passed else 0,
             qa_report_json,
             raw_response,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
         ),
     )
     return int(cur.lastrowid)

@@ -34,6 +34,10 @@ def commit_extraction(
     is_raster_figure: int | None = None,
     note: str | None = None,
     override: bool = False,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
 ) -> dict:
     """Insert/locate the paper, record an approved run, and merge its rows.
 
@@ -73,6 +77,10 @@ def commit_extraction(
                 qa_passed=qa_passed,
                 qa_report_json=qa_report_json,
                 raw_response=raw_response,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
             )
 
             n_rows = extractions_repo.insert_extractions(conn, paper_id, run_id, df)
