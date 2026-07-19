@@ -10,6 +10,8 @@ come later; the schema and master DB they read from are built here.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +20,7 @@ import auth
 import config
 from database import connection, merge
 from extraction import runner
-from extraction.runner import ExtractionResult
+from extraction.runner import BatchItem, ExtractionResult
 from extraction.parse_output import ParseError
 from extraction.prompt_loader import PromptNotReadyError
 from ingestion import dedup, doi as doi_mod, pdf_inspect, upload
@@ -122,6 +124,43 @@ def _restore_staging_queue() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Batch API job persistence (a submitted-but-not-yet-collected batch survives
+# a server restart the same way the per-paper staging queue does)
+# --------------------------------------------------------------------------- #
+
+def _batch_sidecar_path(batch_id: str):
+    return config.STAGING_DIR / f"_batch_{batch_id}.batch.json"
+
+
+def _save_batch_sidecar(
+    batch_id: str, items: dict[str, BatchItem], file_ids: dict[str, str], papers: dict[str, dict]
+) -> None:
+    payload = {
+        "batch_id": batch_id,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "file_ids": file_ids,
+        "items": {sha: asdict(item) for sha, item in items.items()},
+        "papers": papers,  # sha -> {pdf_path, doi, meta, filename}
+    }
+    _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_batch_sidecars() -> dict[str, dict]:
+    out = {}
+    for f in config.STAGING_DIR.glob("_batch_*.batch.json"):
+        try:
+            payload = json.loads(f.read_text(encoding="utf-8"))
+            out[payload["batch_id"]] = payload
+        except Exception:
+            pass  # corrupt sidecar — skip silently
+    return out
+
+
+def _delete_batch_sidecar(batch_id: str) -> None:
+    _batch_sidecar_path(batch_id).unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------- #
 # QA report rendering
 # --------------------------------------------------------------------------- #
 def _format_usage(result: ExtractionResult) -> str:
@@ -200,6 +239,100 @@ def _run_batch(selected: list[dict], figure_is_curve: bool) -> None:
         st.success(f"Extracted {n_ok}/{len(selected)} paper(s) — ready for review below.")
     for filename, msg in errors:
         st.error(f"{filename}: {msg}")
+
+
+def _submit_batch_job(selected: list[dict], figure_is_curve: bool) -> None:
+    """Submit selected papers as one Message Batches API job (50% cheaper,
+    asynchronous). Persists a sidecar so the job can be checked/collected
+    later, including across a server restart."""
+    papers = [(p["sha"], p["pdf_bytes"]) for p in selected]
+    try:
+        batch_id, items, file_ids = runner.submit_batch(papers, figure_is_curve=figure_is_curve)
+    except PromptNotReadyError as e:
+        st.error(f"Prompt not ready: {e}")
+        return
+    except Exception as e:
+        st.error(f"Batch submission failed: {e}")
+        return
+    papers_meta = {
+        p["sha"]: {
+            "pdf_path": p["pdf_path"],
+            "doi": p["doi"],
+            "meta": p["meta"],
+            "filename": p["filename"],
+        }
+        for p in selected
+    }
+    _save_batch_sidecar(batch_id, items, file_ids, papers_meta)
+    st.success(
+        f"Batch submitted: {len(selected)} paper(s), batch_id={batch_id}. Batches usually "
+        "finish within an hour (up to 24h) — come back to 'Batch API jobs' below and click "
+        "'Check status' to retrieve results once it's done."
+    )
+
+
+def _collect_batch_job(batch_id: str, payload: dict) -> None:
+    """Once a batch has ended, parse + QA its results and fold successes into
+    the normal staging/review queue — same shape _run_batch produces."""
+    pending = st.session_state.setdefault("pending", {})
+    items = {sha: BatchItem(**item) for sha, item in payload["items"].items()}
+    try:
+        results = runner.collect_batch(batch_id, items)
+    except Exception as e:
+        st.error(f"Could not collect batch results: {e}")
+        return
+
+    n_ok = 0
+    for sha, result in results.items():
+        filename = payload["papers"][sha]["filename"]
+        if isinstance(result, Exception):
+            st.error(f"{filename}: {result}")
+            continue
+        paper_meta = payload["papers"][sha]
+        result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
+        stash = {
+            "sha": sha,
+            "pdf_path": paper_meta["pdf_path"],
+            "doi": paper_meta["doi"],
+            "meta": paper_meta["meta"],
+            "filename": filename,
+            "result": result,
+        }
+        _save_staging_meta(sha, stash, result)
+        pending[sha] = stash
+        n_ok += 1
+
+    runner.cleanup_batch_files(payload["file_ids"])
+    _delete_batch_sidecar(batch_id)
+    if n_ok:
+        st.success(
+            f"Batch {batch_id}: {n_ok}/{len(results)} paper(s) extracted — ready for review below."
+        )
+
+
+def render_batch_jobs() -> None:
+    sidecars = _load_batch_sidecars()
+    if not sidecars:
+        return
+    st.divider()
+    st.subheader(f"Batch API jobs ({len(sidecars)} in flight)")
+    for batch_id, payload in sidecars.items():
+        with st.container(border=True):
+            st.write(
+                f"**{batch_id}** — {len(payload['items'])} paper(s), "
+                f"submitted {payload['submitted_at']}"
+            )
+            if st.button("Check status", key=f"batch_status_{batch_id}"):
+                try:
+                    status = runner.batch_status(batch_id)
+                except Exception as e:
+                    st.error(f"Could not check batch status: {e}")
+                    continue
+                if status != "ended":
+                    st.info(f"Still processing (status: {status}). Check back later.")
+                    continue
+                _collect_batch_job(batch_id, payload)
+                st.rerun()
 
 
 # --------------------------------------------------------------------------- #
@@ -311,6 +444,7 @@ def main() -> None:
     )
     if not uploaded_files:
         st.info("Upload one or more PDFs to begin.")
+        render_batch_jobs()
         render_review_queue()
         return
 
@@ -346,6 +480,17 @@ def main() -> None:
         "Primary figure(s) are multi-point curves (enables sparse-result QA check)",
         value=True,
     )
+    use_batch_api = st.checkbox(
+        "Use the Batch API instead (50% cheaper token pricing; asynchronous — "
+        "usually done within an hour, up to 24h)",
+        value=False,
+        help=(
+            "Unverified against the live API: code execution + Files API document "
+            "blocks + task budgets inside a batched request hasn't been confirmed "
+            "to work together (each is documented independently, not this exact "
+            "combination). Test on 1-2 papers before trusting it for a full run."
+        ),
+    )
 
     selected = [p for p, inc in zip(previews, edited_table["Include"]) if inc]
     dup_selected = [p for p in selected if p["status"] != "new"]
@@ -356,13 +501,20 @@ def main() -> None:
             "(coexistence), not a duplicate paper."
         )
 
-    if st.button(
-        f"Run extraction on {len(selected)} paper(s)", type="primary", disabled=not selected
-    ):
+    button_label = (
+        f"Submit {len(selected)} paper(s) as a batch"
+        if use_batch_api
+        else f"Run extraction on {len(selected)} paper(s)"
+    )
+    if st.button(button_label, type="primary", disabled=not selected):
         if not auth.require_write_access():
             st.stop()
-        _run_batch(selected, figure_is_curve)
+        if use_batch_api:
+            _submit_batch_job(selected, figure_is_curve)
+        else:
+            _run_batch(selected, figure_is_curve)
 
+    render_batch_jobs()
     render_review_queue()
 
 
