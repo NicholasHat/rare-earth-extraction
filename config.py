@@ -30,6 +30,12 @@ EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-opus-4-8")
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
 
+# Loose backstop on total tokens (thinking + tool use) an extraction call may
+# spend across its whole code-execution loop — self-moderated by the model,
+# not an enforced ceiling. Guards against the runaway narrated-clustering /
+# repeated-re-render failure mode (prompts/CHANGELOG.md, extraction_v6/v7).
+EXTRACTION_TASK_BUDGET_TOKENS = int(os.getenv("EXTRACTION_TASK_BUDGET_TOKENS", "100000"))
+
 
 def ensure_dirs() -> None:
     """Create the runtime data directories if they don't exist."""

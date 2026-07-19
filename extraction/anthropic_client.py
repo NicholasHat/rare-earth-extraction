@@ -19,7 +19,7 @@ import anthropic
 
 import config
 
-_BETAS = ["files-api-2025-04-14"]
+_BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13"]
 _CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
 
 
@@ -110,6 +110,15 @@ def extract(
             ],
             betas=_BETAS,
             tools=[_CODE_EXECUTION_TOOL],
+            # Loose backstop, not a hard cap (that's max_tokens): the model sees
+            # a running countdown across the whole tool loop and self-moderates
+            # instead of narrating trial-and-error indefinitely.
+            output_config={
+                "task_budget": {
+                    "type": "tokens",
+                    "total": config.EXTRACTION_TASK_BUDGET_TOKENS,
+                }
+            },
             messages=[
                 {"role": "user", "content": _build_user_content(uploaded.id, analysis_block)}
             ],
