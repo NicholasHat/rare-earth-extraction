@@ -273,7 +273,15 @@ def _submit_batch_job(selected: list[dict], figure_is_curve: bool) -> None:
 
 def _collect_batch_job(batch_id: str, payload: dict) -> None:
     """Once a batch has ended, parse + QA its results and fold successes into
-    the normal staging/review queue — same shape _run_batch produces."""
+    the normal staging/review queue — same shape _run_batch produces.
+
+    A paper whose result fails to parse/QA is recorded in the sidecar's
+    `errors` and kept in `items` so it stays visible across reruns and server
+    restarts, instead of a one-shot st.error that flashes and is gone the
+    moment the immediate st.rerun() below fires. The sidecar and its Files
+    API uploads are only cleaned up once every item has landed in the review
+    queue — a batch with failures is never silently discarded.
+    """
     pending = st.session_state.setdefault("pending", {})
     items = {sha: BatchItem(**item) for sha, item in payload["items"].items()}
     try:
@@ -283,10 +291,11 @@ def _collect_batch_job(batch_id: str, payload: dict) -> None:
         return
 
     n_ok = 0
+    errors: dict[str, str] = {}
     for sha, result in results.items():
         filename = payload["papers"][sha]["filename"]
         if isinstance(result, Exception):
-            st.error(f"{filename}: {result}")
+            errors[sha] = str(result)
             continue
         paper_meta = payload["papers"][sha]
         result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
@@ -302,8 +311,15 @@ def _collect_batch_job(batch_id: str, payload: dict) -> None:
         pending[sha] = stash
         n_ok += 1
 
-    runner.cleanup_batch_files(payload["file_ids"])
-    _delete_batch_sidecar(batch_id)
+    if errors:
+        payload["items"] = {sha: v for sha, v in payload["items"].items() if sha in errors}
+        payload["papers"] = {sha: v for sha, v in payload["papers"].items() if sha in errors}
+        payload["errors"] = errors
+        _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        runner.cleanup_batch_files(payload["file_ids"])
+        _delete_batch_sidecar(batch_id)
+
     if n_ok:
         st.success(
             f"Batch {batch_id}: {n_ok}/{len(results)} paper(s) extracted — ready for review below."
@@ -322,17 +338,28 @@ def render_batch_jobs() -> None:
                 f"**{batch_id}** — {len(payload['items'])} paper(s), "
                 f"submitted {payload['submitted_at']}"
             )
-            if st.button("Check status", key=f"batch_status_{batch_id}"):
-                try:
-                    status = runner.batch_status(batch_id)
-                except Exception as e:
-                    st.error(f"Could not check batch status: {e}")
-                    continue
-                if status != "ended":
-                    st.info(f"Still processing (status: {status}). Check back later.")
-                    continue
-                _collect_batch_job(batch_id, payload)
-                st.rerun()
+            errors = payload.get("errors", {})
+            for sha, msg in errors.items():
+                filename = payload["papers"].get(sha, {}).get("filename", sha)
+                st.error(f"{filename}: {msg}")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Check status", key=f"batch_status_{batch_id}"):
+                    try:
+                        status = runner.batch_status(batch_id)
+                    except Exception as e:
+                        st.error(f"Could not check batch status: {e}")
+                        continue
+                    if status != "ended":
+                        st.info(f"Still processing (status: {status}). Check back later.")
+                        continue
+                    _collect_batch_job(batch_id, payload)
+                    st.rerun()
+            with col2:
+                if errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):
+                    runner.cleanup_batch_files(payload["file_ids"])
+                    _delete_batch_sidecar(batch_id)
+                    st.rerun()
 
 
 # --------------------------------------------------------------------------- #
