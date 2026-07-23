@@ -29,12 +29,13 @@ Old versions are never edited or deleted.
   cost optimization, not a new ground-truth signal QA validates against.
 - Core extraction behaviour (Steps 0–10, OUTPUT CONTRACT wire format) is
   otherwise unchanged from v7.
-- Paired with a request-level change in `extraction/anthropic_client.py` (not
-  a prompt change, so no separate version bump for it): context editing
-  (`clear_tool_uses_20250919`) clears stale code-execution tool results
-  mid-loop, since the server-side tool loop otherwise resends the entire
-  accumulated transcript on every internal iteration — the other diagnosed
-  driver of the same cost problem.
+- A paired request-level change (context editing, `clear_tool_uses_20250919`
+  in `extraction/anthropic_client.py`) was tried alongside this and reverted:
+  clearing stale tool results mid-conversation breaks the prompt-cache prefix
+  for everything downstream of the clear, forcing cache-write-priced tokens
+  where this pipeline was getting cache-read-priced tokens. Measured on a live
+  run as a 2-3x cost regression (cache_creation_input_tokens rose 7.7x), not a
+  saving. Don't re-attempt it without a plan for the cache invalidation.
 
 ## extraction_v7 — compact positional output format
 - The OUTPUT CONTRACT's `rows` shape changes from a list of objects (each row

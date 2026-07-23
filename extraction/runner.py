@@ -180,15 +180,35 @@ def batch_status(batch_id: str) -> str:
 
 
 def collect_batch(
-    batch_id: str, items: dict[str, BatchItem]
+    batch_id: str, items: dict[str, BatchItem], file_ids: dict[str, str]
 ) -> dict[str, ExtractionResult | Exception]:
     """Once the batch has ended, parse + QA every succeeded result.
 
     A paper whose batch item errored, or whose output fails to parse, is
     surfaced as an Exception value rather than raised, so one bad paper
-    doesn't lose the rest of the batch.
+    doesn't lose the rest of the batch. A paper whose server-side tool loop
+    paused (stop_reason=pause_turn) is transparently finished off with a
+    synchronous continuation inside collect_batch_results — see there. That
+    requires re-sending the original request, so we reload each item's pinned
+    prompt text by version (cheap — a local file read, not an API call) and
+    reuse the already-uploaded `file_id` rather than re-uploading the PDF.
     """
-    raw_results = anthropic_client.collect_batch_results(batch_id)
+    prompt_text_by_version: dict[str, str] = {}
+    request_items = []
+    for custom_id, item in items.items():
+        if item.prompt_version not in prompt_text_by_version:
+            prompt_text_by_version[item.prompt_version] = prompt_loader.load_prompt(
+                item.prompt_version
+            ).text
+        request_items.append((
+            custom_id,
+            prompt_text_by_version[item.prompt_version],
+            file_ids[custom_id],
+            item.analysis_block or None,
+            item.model,
+        ))
+
+    raw_results = anthropic_client.collect_batch_results(batch_id, request_items)
     out: dict[str, ExtractionResult | Exception] = {}
     for custom_id, item in items.items():
         raw = raw_results.get(custom_id)

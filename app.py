@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -271,6 +271,25 @@ def _submit_batch_job(selected: list[dict], figure_is_curve: bool) -> None:
     )
 
 
+# A paused batch item is finished off with a synchronous pause_turn
+# continuation (anthropic_client._continue_until_done), which can take a
+# while and has no visual feedback of its own — long enough that a user
+# clicking "Check status" again before it finishes previously restarted the
+# whole (expensive) continuation from scratch, redoing the same work several
+# times over. This lock (persisted in the sidecar) blocks a second collection
+# attempt while one is in flight; the staleness window lets it self-heal if a
+# prior attempt crashed without clearing it.
+_COLLECTION_LOCK_STALE_AFTER = timedelta(minutes=10)
+
+
+def _collection_in_progress(payload: dict) -> bool:
+    started = payload.get("collection_started_at")
+    if not started:
+        return False
+    started_dt = datetime.fromisoformat(started)
+    return datetime.now(timezone.utc) - started_dt < _COLLECTION_LOCK_STALE_AFTER
+
+
 def _collect_batch_job(batch_id: str, payload: dict) -> None:
     """Once a batch has ended, parse + QA its results and fold successes into
     the normal staging/review queue — same shape _run_batch produces.
@@ -281,12 +300,17 @@ def _collect_batch_job(batch_id: str, payload: dict) -> None:
     moment the immediate st.rerun() below fires. The sidecar and its Files
     API uploads are only cleaned up once every item has landed in the review
     queue — a batch with failures is never silently discarded.
+
+    Caller must hold the collection lock (`collection_started_at` already set
+    and persisted) before calling this — see render_batch_jobs.
     """
     pending = st.session_state.setdefault("pending", {})
     items = {sha: BatchItem(**item) for sha, item in payload["items"].items()}
     try:
-        results = runner.collect_batch(batch_id, items)
+        results = runner.collect_batch(batch_id, items, payload["file_ids"])
     except Exception as e:
+        payload.pop("collection_started_at", None)
+        _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
         st.error(f"Could not collect batch results: {e}")
         return
 
@@ -315,6 +339,7 @@ def _collect_batch_job(batch_id: str, payload: dict) -> None:
         payload["items"] = {sha: v for sha, v in payload["items"].items() if sha in errors}
         payload["papers"] = {sha: v for sha, v in payload["papers"].items() if sha in errors}
         payload["errors"] = errors
+        payload.pop("collection_started_at", None)
         _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
     else:
         runner.cleanup_batch_files(payload["file_ids"])
@@ -342,9 +367,19 @@ def render_batch_jobs() -> None:
             for sha, msg in errors.items():
                 filename = payload["papers"].get(sha, {}).get("filename", sha)
                 st.error(f"{filename}: {msg}")
+            if _collection_in_progress(payload):
+                st.info(
+                    "A previous check is still finishing up — this can take a while "
+                    "if a paper needs a synchronous pause_turn continuation. Please "
+                    "wait rather than checking again; re-checking now would restart "
+                    "that (expensive) continuation from scratch."
+                )
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("Check status", key=f"batch_status_{batch_id}"):
+                if st.button(
+                    "Check status", key=f"batch_status_{batch_id}",
+                    disabled=_collection_in_progress(payload),
+                ):
                     try:
                         status = runner.batch_status(batch_id)
                     except Exception as e:
@@ -353,7 +388,13 @@ def render_batch_jobs() -> None:
                     if status != "ended":
                         st.info(f"Still processing (status: {status}). Check back later.")
                         continue
-                    _collect_batch_job(batch_id, payload)
+                    payload["collection_started_at"] = datetime.now(timezone.utc).isoformat()
+                    _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
+                    with st.spinner(
+                        "Collecting batch results — this can take a while if any "
+                        "paper needs an extra synchronous digitization round..."
+                    ):
+                        _collect_batch_job(batch_id, payload)
                     st.rerun()
             with col2:
                 if errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):

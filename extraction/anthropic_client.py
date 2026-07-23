@@ -16,50 +16,33 @@ Two ways to run an extraction, sharing the same request shape (_message_kwargs):
     own partial response, per the documented continuation pattern — a rich
     multi-element paper can legitimately need more than 10 iterations.
   - `submit_batch()` / `poll_batch_status()` / `collect_batch_results()` — the
-    Message Batches API, 50% cheaper and asynchronous. Has no round trip to
-    continue a paused batch item, so a `pause_turn` result there surfaces as
-    a clear error instead. See the flag on that section below before relying
-    on it for a full run.
+    Message Batches API, 50% cheaper and asynchronous. Gets a higher per-turn
+    iteration cap than the sync path, so most papers never pause here; a
+    `pause_turn` result is transparently finished off with a synchronous
+    continuation (`_continue_until_done`) rather than surfaced as an error.
+    See the flag on that section below before relying on it for a full run.
 
 A `stop_reason` of `max_tokens` or `refusal` is always a hard failure (surfaced
 as a specific RuntimeError, not a bare parse error) — see `_check_stop_reason`.
 
-Both request paths also enable context editing (`_CONTEXT_MANAGEMENT`): the
-server-side code-execution loop otherwise resends the entire accumulated
-tool-use/tool-result transcript on every internal iteration, so cost grows
-roughly quadratically with iteration count on a dense multi-figure paper.
-Clearing stale tool results mid-loop converts that to closer-to-linear growth.
-
-ASSUMPTION FLAGGED FOR VERIFICATION (applies to BOTH `extract()` and the batch
-path, not just the batch-specific one below): the public docs describe context
-editing generically and code execution generically, but not this specific
-combination running against a server-side tool loop with `pause_turn`
-continuations. Verify on a live run before trusting the cost drop — check
-`prompt_runs`' usage columns for the expected reduction, and that
-`_run_with_continuations`'s debug log (`"context editing applied: ..."`)
-actually fires at least once on a dense multi-figure paper.
+Context editing (`clear_tool_uses_20250919`) was tried here and reverted: it
+clears stale tool-use/tool-result pairs mid-conversation, but that clearing
+breaks the prompt-cache prefix for everything downstream of it, forcing a
+cache-*write* (1.25x-2x price) instead of the cache-*read* (0.1x price) this
+pipeline was already getting on ~96% of its tokens. On a live paper it raised
+cache_creation_input_tokens 7.7x and roughly doubled-to-tripled total cost —
+worse, not better. Don't re-add it without a plan for the cache invalidation.
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 import anthropic
 
 import config
 
-logger = logging.getLogger(__name__)
-
-_BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13", "context-management-2025-06-27"]
+_BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13"]
 _CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
-# Clears stale code-execution tool_use/tool_result pairs mid-loop once the
-# running context passes the trigger — without this, the server-side tool
-# loop resends the *entire* accumulated transcript on every internal
-# iteration, so cost grows roughly quadratically with iteration count on a
-# dense multi-figure paper (the dominant driver behind a measured ~$6-7,
-# 96%-cache-served run). Left at the API's own defaults (trigger @ 100k input
-# tokens, keep the last 3 tool-use/result pairs) rather than hand-tuned.
-_CONTEXT_MANAGEMENT = {"edits": [{"type": "clear_tool_uses_20250919"}]}
 
 
 @dataclass(frozen=True)
@@ -163,7 +146,6 @@ def _message_kwargs(prompt_text: str, file_id: str, *, model: str, analysis_bloc
                 "total": config.EXTRACTION_TASK_BUDGET_TOKENS,
             }
         },
-        context_management=_CONTEXT_MANAGEMENT,
         messages=[{"role": "user", "content": _build_user_content(file_id, analysis_block)}],
     )
 
@@ -213,34 +195,40 @@ def _response_from_message_chain(messages: list) -> ExtractResponse:
 _MAX_CONTINUATIONS = 5
 
 
-def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict) -> list:
-    """Run one extraction call, automatically resuming through pause_turn by
+def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list) -> list:
+    """Continue a message chain whose last entry paused (stop_reason=pause_turn),
     re-sending the assistant's own (cumulative) partial response — the
     documented continuation pattern for the server-side tool loop's iteration
-    cap. Returns every message in the chain (usually just one)."""
+    cap — until a non-pause_turn stop reason or _MAX_CONTINUATIONS is hit.
+    `chain` must be non-empty; if its last message didn't pause, it's returned
+    unchanged. Appends to and returns `chain`."""
     user_content = kwargs["messages"][0]["content"]
-    messages = kwargs["messages"]
-    chain = []
 
-    for _ in range(_MAX_CONTINUATIONS + 1):
-        with client.beta.messages.stream(betas=_BETAS, **{**kwargs, "messages": messages}) as stream:
-            message = stream.get_final_message()
-        applied = getattr(message, "context_management", None)
-        if applied and getattr(applied, "applied_edits", None):
-            logger.info("context editing applied: %s", applied.applied_edits)
-        chain.append(message)
-        if message.stop_reason != "pause_turn":
+    for _ in range(_MAX_CONTINUATIONS):
+        if chain[-1].stop_reason != "pause_turn":
             return chain
         messages = [
             {"role": "user", "content": user_content},
-            {"role": "assistant", "content": message.content},
+            {"role": "assistant", "content": chain[-1].content},
         ]
+        with client.beta.messages.stream(betas=_BETAS, **{**kwargs, "messages": messages}) as stream:
+            chain.append(stream.get_final_message())
 
-    raise RuntimeError(
-        f"extraction did not finish after {_MAX_CONTINUATIONS} pause_turn continuations "
-        "(the server-side tool loop kept pausing) — this paper may need more figures/"
-        "elements digitized than this pipeline currently handles in one run"
-    )
+    if chain[-1].stop_reason == "pause_turn":
+        raise RuntimeError(
+            f"extraction did not finish after {_MAX_CONTINUATIONS} pause_turn continuations "
+            "(the server-side tool loop kept pausing) — this paper may need more figures/"
+            "elements digitized than this pipeline currently handles in one run"
+        )
+    return chain
+
+
+def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict) -> list:
+    """Run one extraction call, automatically resuming through pause_turn.
+    Returns every message in the chain (usually just one)."""
+    with client.beta.messages.stream(betas=_BETAS, **kwargs) as stream:
+        message = stream.get_final_message()
+    return _continue_until_done(client, kwargs, [message])
 
 
 def extract(
@@ -271,14 +259,17 @@ def extract(
 
 # --------------------------------------------------------------------------- #
 # Message Batches API — 50% cheaper token pricing; asynchronous (usually
-# minutes, up to 24h).
+# minutes, up to 24h). Gets a HIGHER per-turn server-side-tool-loop iteration
+# cap than the synchronous path before pausing (Anthropic's docs), so most
+# papers never hit pause_turn here at all; the rare one that does is finished
+# off synchronously — see collect_batch_results.
 #
 # ASSUMPTION FLAGGED FOR VERIFICATION: the public docs describe code
-# execution, Files API document blocks, task budgets, and context editing
-# each independently, but not this specific combination running inside a
-# *batched* (non-streaming, asynchronously processed) request. Test on 1-2
-# papers before relying on this for a full run — see README §"Building next"
-# / the Batch API entry in prompts/CHANGELOG.md.
+# execution, Files API document blocks, and task budgets each independently,
+# but not this specific combination running inside a *batched* (non-
+# streaming, asynchronously processed) request. Test on 1-2 papers before
+# relying on this for a full run — see README §"Building next" / the Batch
+# API entry in prompts/CHANGELOG.md.
 # --------------------------------------------------------------------------- #
 
 
@@ -318,13 +309,34 @@ def poll_batch_status(batch_id: str) -> str:
     return client.beta.messages.batches.retrieve(batch_id).processing_status
 
 
-def collect_batch_results(batch_id: str) -> dict[str, ExtractResponse | Exception]:
+def collect_batch_results(
+    batch_id: str, items: list[tuple[str, str, str, str | None, str]]
+) -> dict[str, ExtractResponse | Exception]:
     """Fetch results once the batch has ended. Keyed by custom_id.
+
+    `items` is (custom_id, prompt_text, file_id, analysis_block, model) for
+    every request originally submitted — the same shape `submit_batch`'s
+    `items` accepts, but with the already-uploaded `file_id` in place of raw
+    `pdf_bytes` (no need to re-upload). Only used to rebuild the request for a
+    paused item (below); an item that finished cleanly never touches it.
 
     A result that errored/canceled/expired is surfaced as a RuntimeError value
     rather than raised, so one bad paper doesn't lose the rest of the batch.
+
+    A paused item (stop_reason=pause_turn) is NOT treated as a terminal
+    failure: batch requests get a HIGHER per-turn iteration cap than
+    synchronous ones, so pausing anyway means a genuinely demanding paper.
+    Anthropic's docs confirm a paused batch item can be continued via either
+    a new batch request or a synchronous one — we use the latter (the same
+    `_continue_until_done` the sync `extract()` path uses), so only the rare
+    paused item pays synchronous price for its remaining iterations; the rest
+    of the batch stays batch-discounted.
     """
     client = anthropic.Anthropic()
+    by_id = {
+        custom_id: (prompt_text, file_id, analysis_block, model)
+        for custom_id, prompt_text, file_id, analysis_block, model in items
+    }
     out: dict[str, ExtractResponse | Exception] = {}
     for result in client.beta.messages.batches.results(batch_id):
         if result.result.type != "succeeded":
@@ -332,11 +344,18 @@ def collect_batch_results(batch_id: str) -> dict[str, ExtractResponse | Exceptio
                 f"batch item {result.custom_id!r} did not succeed: {result.result.type}"
             )
             continue
+        message = result.result.message
         try:
-            out[result.custom_id] = _response_from_message(result.result.message)
+            if message.stop_reason == "pause_turn":
+                prompt_text, file_id, analysis_block, model = by_id[result.custom_id]
+                kwargs = _message_kwargs(
+                    prompt_text, file_id, model=model, analysis_block=analysis_block
+                )
+                chain = _continue_until_done(client, kwargs, [message])
+                out[result.custom_id] = _response_from_message_chain(chain)
+            else:
+                out[result.custom_id] = _response_from_message(message)
         except RuntimeError as e:
-            # e.g. stop_reason=pause_turn — the Batches API has no round trip
-            # to continue a paused server-side tool loop, unlike extract().
             out[result.custom_id] = e
     return out
 
