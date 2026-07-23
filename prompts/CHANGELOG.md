@@ -4,7 +4,39 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v7 — compact positional output format (current pinned default)
+## extraction_v8 — deterministic curve pre-pass becomes a digitizer (current pinned default)
+- `extraction/curve_prepass.py` no longer discards the calibrated (x, y) marker
+  coordinates the vector path already computes (`curve_extractor.extractor`
+  runs axis calibration for every vector page, but the pre-pass previously
+  kept only per-series counts). Authoritative pages now also carry a
+  `DIGITIZED CURVE DATA` JSON block (`{group_key: [[x, y], ...], ...}`,
+  coordinates rounded to 4 significant figures) injected alongside the
+  existing ground-truth count sentence.
+- The prompt's "Deterministic curve analysis" section gains a new subsection
+  telling the model to skip its own axis calibration and clustering (Steps
+  3-5) for series covered by this block, going straight to legend-mapping
+  (Step 4) and unit/experimental-constant conversions (Steps 7-8) — this
+  targets the dominant cost driver on dense multi-figure papers: the model's
+  own exploratory code-execution digitization work.
+- Scoped to vector, filled-marker (coloured) series on already-authoritative
+  pages only — the same trust gate the existing counts anchor uses. Monochrome
+  (marker-shape) series are explicitly excluded; that assembly path isn't
+  implemented (docs/curve_extractor_plan.md), so those series still receive
+  full Steps 3-5 treatment regardless of what else on the page is pre-digitised.
+  Estimate/raster pages are unaffected.
+- No change to the QA layer: `deterministic_curve_count` still cross-checks
+  row counts exactly as before — the new coordinate block is a prompt-side
+  cost optimization, not a new ground-truth signal QA validates against.
+- Core extraction behaviour (Steps 0–10, OUTPUT CONTRACT wire format) is
+  otherwise unchanged from v7.
+- Paired with a request-level change in `extraction/anthropic_client.py` (not
+  a prompt change, so no separate version bump for it): context editing
+  (`clear_tool_uses_20250919`) clears stale code-execution tool results
+  mid-loop, since the server-side tool loop otherwise resends the entire
+  accumulated transcript on every internal iteration — the other diagnosed
+  driver of the same cost problem.
+
+## extraction_v7 — compact positional output format
 - The OUTPUT CONTRACT's `rows` shape changes from a list of objects (each row
   repeating all 26 verbose column-name keys, e.g.
   `"Rare Earth Elements (REY:La, Ce, Nd)"`) to a positional form: a top-level

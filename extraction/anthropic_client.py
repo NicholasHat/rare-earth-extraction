@@ -23,17 +23,43 @@ Two ways to run an extraction, sharing the same request shape (_message_kwargs):
 
 A `stop_reason` of `max_tokens` or `refusal` is always a hard failure (surfaced
 as a specific RuntimeError, not a bare parse error) — see `_check_stop_reason`.
+
+Both request paths also enable context editing (`_CONTEXT_MANAGEMENT`): the
+server-side code-execution loop otherwise resends the entire accumulated
+tool-use/tool-result transcript on every internal iteration, so cost grows
+roughly quadratically with iteration count on a dense multi-figure paper.
+Clearing stale tool results mid-loop converts that to closer-to-linear growth.
+
+ASSUMPTION FLAGGED FOR VERIFICATION (applies to BOTH `extract()` and the batch
+path, not just the batch-specific one below): the public docs describe context
+editing generically and code execution generically, but not this specific
+combination running against a server-side tool loop with `pause_turn`
+continuations. Verify on a live run before trusting the cost drop — check
+`prompt_runs`' usage columns for the expected reduction, and that
+`_run_with_continuations`'s debug log (`"context editing applied: ..."`)
+actually fires at least once on a dense multi-figure paper.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import anthropic
 
 import config
 
-_BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13"]
+logger = logging.getLogger(__name__)
+
+_BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13", "context-management-2025-06-27"]
 _CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
+# Clears stale code-execution tool_use/tool_result pairs mid-loop once the
+# running context passes the trigger — without this, the server-side tool
+# loop resends the *entire* accumulated transcript on every internal
+# iteration, so cost grows roughly quadratically with iteration count on a
+# dense multi-figure paper (the dominant driver behind a measured ~$6-7,
+# 96%-cache-served run). Left at the API's own defaults (trigger @ 100k input
+# tokens, keep the last 3 tool-use/result pairs) rather than hand-tuned.
+_CONTEXT_MANAGEMENT = {"edits": [{"type": "clear_tool_uses_20250919"}]}
 
 
 @dataclass(frozen=True)
@@ -137,6 +163,7 @@ def _message_kwargs(prompt_text: str, file_id: str, *, model: str, analysis_bloc
                 "total": config.EXTRACTION_TASK_BUDGET_TOKENS,
             }
         },
+        context_management=_CONTEXT_MANAGEMENT,
         messages=[{"role": "user", "content": _build_user_content(file_id, analysis_block)}],
     )
 
@@ -198,6 +225,9 @@ def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict) -> list:
     for _ in range(_MAX_CONTINUATIONS + 1):
         with client.beta.messages.stream(betas=_BETAS, **{**kwargs, "messages": messages}) as stream:
             message = stream.get_final_message()
+        applied = getattr(message, "context_management", None)
+        if applied and getattr(applied, "applied_edits", None):
+            logger.info("context editing applied: %s", applied.applied_edits)
         chain.append(message)
         if message.stop_reason != "pause_turn":
             return chain
@@ -244,11 +274,11 @@ def extract(
 # minutes, up to 24h).
 #
 # ASSUMPTION FLAGGED FOR VERIFICATION: the public docs describe code
-# execution, Files API document blocks, and task budgets each independently,
-# but not this specific combination running inside a *batched* (non-
-# streaming, asynchronously processed) request. Test on 1-2 papers before
-# relying on this for a full run — see README §"Building next" / the Batch
-# API entry in prompts/CHANGELOG.md.
+# execution, Files API document blocks, task budgets, and context editing
+# each independently, but not this specific combination running inside a
+# *batched* (non-streaming, asynchronously processed) request. Test on 1-2
+# papers before relying on this for a full run — see README §"Building next"
+# / the Batch API entry in prompts/CHANGELOG.md.
 # --------------------------------------------------------------------------- #
 
 
