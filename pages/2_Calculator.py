@@ -6,9 +6,11 @@ touching the Anthropic API, plus an optional cross-reference against prior
 """
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from calculator.atomic_mass import REE_ELEMENTS
+from calculator.predict import predict_extract_pct
 from calculator.sanity import typical_ranges
 from calculator.solve import CalculatorInputs, solve
 from database import connection
@@ -49,6 +51,12 @@ with col2:
     has_pH = st.checkbox("Check against a target pH")
     target_pH = st.number_input(
         "Target pH", min_value=-1.0, max_value=14.0, value=2.0, step=0.1, disabled=not has_pH
+    )
+    volume_ratio = st.number_input(
+        "Phase volume ratio (org:aq)", min_value=0.1, value=1.0, step=0.1,
+        help="The extraction schema doesn't record phase ratio, so prior data "
+             "can't be filtered by it — predictions assume the papers' own "
+             "(usually 1:1) ratio.",
     )
 
 st.divider()
@@ -126,3 +134,75 @@ if st.button("Solve", type="primary"):
                     f"(median {summary.pH_median:.2g}). Your input of pH {target_pH:g} is outside "
                     "this range — double-check; the dataset may simply be incomplete."
                 )
+
+    # Predicted Extract% at the target pH, interpolated inside real measured
+    # sweeps from prior approved papers (calculator.predict — deterministic,
+    # per-paper, never extrapolated beyond a sweep's measured pH range).
+    if extractant and has_pH:
+        conn = connection.get_readonly_conn()
+        try:
+            prediction = predict_extract_pct(
+                conn,
+                element=element,
+                extractant=extractant,
+                ph=target_pH,
+                extractant_conc_mM=result.extractant_conc_mM,
+                feed_ppm=result.ree_ppm,
+            )
+        finally:
+            conn.close()
+
+        st.subheader(f"Predicted Extract% — {element} with {extractant} at pH {target_pH:g}")
+        if volume_ratio != 1.0:
+            st.warning(
+                f"Phase ratio {volume_ratio:g}:1 requested, but the schema doesn't record "
+                "phase ratio — prior data generally assumes ~1:1, so treat the prediction "
+                "as approximate at other ratios."
+            )
+
+        def _series_rows(series_list):
+            return pd.DataFrame([
+                {
+                    "paper_id": s.paper_id,
+                    "extractant conc. (mM)": s.extractant_conc_mM,
+                    "feed (ppm)": s.feed_ppm,
+                    "sweep points": s.n_points,
+                    "sweep pH range": f"{s.ph_min:g}–{s.ph_max:g}",
+                    "predicted Extract%": (
+                        f"{s.predicted_extract_pct:.1f}"
+                        if s.predicted_extract_pct is not None
+                        else "pH outside measured sweep"
+                    ),
+                    "interpolated between (pH, %)": (
+                        f"{s.bracket[0]} ↔ {s.bracket[1]}" if s.bracket else "—"
+                    ),
+                }
+                for s in series_list
+            ])
+
+        if not prediction.matched and not prediction.off_condition:
+            st.info(
+                f"No approved pH-sweep data for {extractant} + {element} yet — "
+                "the prediction needs at least one merged paper measuring it."
+            )
+        else:
+            if prediction.best_estimate is not None:
+                st.metric(
+                    "Best estimate (median of matched sweeps)",
+                    f"{prediction.best_estimate:.1f}%",
+                )
+            elif prediction.matched:
+                st.info(
+                    "Matching sweeps exist but none covers this pH — see their "
+                    "measured ranges below (predictions are never extrapolated)."
+                )
+            if prediction.matched:
+                st.dataframe(_series_rows(prediction.matched), use_container_width=True)
+            if prediction.off_condition:
+                with st.expander(
+                    f"Sweeps under other conditions ({len(prediction.off_condition)}) — "
+                    "same pair, different conc./feed"
+                ):
+                    st.dataframe(
+                        _series_rows(prediction.off_condition), use_container_width=True
+                    )
