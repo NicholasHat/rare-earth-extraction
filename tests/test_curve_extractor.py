@@ -132,6 +132,66 @@ def test_remove_text_rows_noop_on_scattered_markers():
     assert n_text == 0 and len(kept) == len(blobs)
 
 
+# --- raster shape families + template recovery (synthetic images) ------------ #
+
+def _draw_square(img, cx, cy, half=6):
+    img[cy - half:cy + half, cx - half:cx + half] = 0
+
+
+def _draw_disk(img, cx, cy, r=7):
+    yy, xx = np.ogrid[:img.shape[0], :img.shape[1]]
+    img[(yy - cy) ** 2 + (xx - cx) ** 2 <= r * r] = 0
+
+
+def _draw_triangle(img, cx, cy, half=7):
+    for dy in range(2 * half):           # apex up: row width grows with dy
+        w = int(half * dy / (2 * half - 1))
+        img[cy - half + dy, cx - w:cx + w + 1] = 0
+
+
+def test_filled_shape_families_get_distinct_group_keys():
+    img = np.full((200, 400), 255, dtype=np.uint8)
+    for i in range(5):
+        _draw_square(img, 40 + 70 * i, 40)
+        _draw_disk(img, 40 + 70 * i, 100)
+        _draw_triangle(img, 40 + 70 * i, 160)
+    blobs = raster.detect_blobs(img)
+    families = {}
+    for b in blobs:
+        mtype, fam = raster.classify_blob_shape(b)
+        assert mtype == "filled"
+        families[fam] = families.get(fam, 0) + 1
+    assert families == {"filled_square": 5, "filled_circle": 5, "filled_triangle": 5}
+
+
+def test_template_recovery_finds_marker_lost_by_blob_filtering():
+    # Six squares; blob detection "keeps" only five (simulating one lost to an
+    # overlap merge). The recovery pass must find the sixth from an exemplar
+    # template — and must not duplicate the five already-kept ones.
+    img = np.full((120, 500), 255, dtype=np.uint8)
+    centers = [(40 + 75 * i, 60) for i in range(6)]
+    for cx, cy in centers:
+        _draw_square(img, cx, cy)
+    blobs = raster.detect_blobs(img)
+    assert len(blobs) == 6
+    lost = min(blobs, key=lambda b: b["cx"])
+    kept = [b for b in blobs if b is not lost]
+    recovered = raster._recover_missed_markers(raster._ink_mask(img), kept)
+    assert len(recovered) == 1
+    family, cx, cy = recovered[0]
+    assert family == "filled_square"
+    assert abs(cx - lost["cx"]) <= 2 and abs(cy - lost["cy"]) <= 2
+
+
+def test_template_recovery_needs_enough_exemplars():
+    img = np.full((100, 300), 255, dtype=np.uint8)
+    for i in range(3):
+        _draw_square(img, 40 + 70 * i, 50)
+    blobs = raster.detect_blobs(img)
+    # Only 3 clean detections (< _TEMPLATE_MIN_EXEMPLARS) — no recovery attempted.
+    assert raster._recover_missed_markers(raster._ink_mask(img), blobs) == []
+
+
 # --- integration (real PDF, skipped if absent) ------------------------------ #
 
 _SWAIN = Path("data/incoming/b5a26fd1b0a4575e614a7228ddc04c760ddfc556c57d2b3302ec1031116693d9.pdf")

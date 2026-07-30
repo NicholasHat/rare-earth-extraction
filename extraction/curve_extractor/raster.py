@@ -5,9 +5,14 @@ Quinn et al. 2015 — 200 DPI grayscale, monochrome, marker-shape-coded).
 Pipeline: render the figure region at high DPI → threshold → suppress the thin
 connecting/axis lines with a morphological opening (so markers sitting ON a line
 don't merge into it) → connected-component blobs → size-filter to marker scale →
-classify shape (filled ■●▲ vs stroked ×/+/✶) → return MarkerRecords in pixel
-coords. Grouping by element (shape→element) and calibration are left to the
-caller/LLM, same seam as the vector path.
+classify shape family (■ vs ● vs ▲/◆ by extent + mass offset; stroked ×/+/✶ by
+fill ratio) → template-matching recovery (scikit-image `match_template`): markers
+that overlap a curve, another marker, or baked-in text merge into blobs the size/
+aspect filters rightly reject, so for each filled family with enough clean
+detections one exemplar is cross-correlated over the full ink mask and new
+correlation peaks become recovered markers. MarkerRecords come back in pixel
+coords, grouped by shape family. Element mapping (shape→element via the legend)
+and calibration are left to the caller/LLM, same seam as the vector path.
 
 This is a best-effort detector: monochrome shape coding at ~15px with crowded
 panels is the hardest figure class, so callers should treat its counts as
@@ -15,8 +20,12 @@ review-gated, not ground truth (the warnings surface low-confidence groups).
 """
 from __future__ import annotations
 
+import math
+from collections import defaultdict
+
 import numpy as np
 from scipy import ndimage
+from skimage.feature import match_template, peak_local_max
 
 from .types import MarkerRecord
 
@@ -39,6 +48,18 @@ _MARKER_ASPECT_HI = 1.8
 _TEXTROW_Y_TOL = 8
 _TEXTROW_MIN_BLOBS = 8
 _TEXTROW_MAX_MEDIAN_GAP = 36
+# Filled shape families by extent (= area / bbox area, on the thresholded render):
+# square ≈ 1.0, circle ≈ π/4 ≈ 0.79, triangle/diamond ≈ 0.5. Triangle vs diamond
+# splits on vertical mass offset — a triangle's centroid sits off the bbox centre,
+# a diamond's on it. Bands are loose to absorb anti-aliasing at ~15-30px.
+_SQUARE_MIN_EXTENT = 0.87
+_CIRCLE_MIN_EXTENT = 0.62
+_FILLED_MIN_EXTENT = 0.42
+_TRIANGLE_CENTROID_OFFSET = 0.08
+# Template-matching recovery: needs enough clean same-family detections to trust
+# an exemplar patch, and a correlation peak this strong to call it a marker.
+_TEMPLATE_MIN_EXEMPLARS = 4
+_TEMPLATE_MATCH_THRESHOLD = 0.6
 
 
 def render_region(page, bbox, dpi: int = _RENDER_DPI) -> np.ndarray:
@@ -80,9 +101,14 @@ def detect_blobs(arr: np.ndarray) -> list[dict]:
         cy = (ys.start + ys.stop - 1) / 2.0
         cx = (xs.start + xs.stop - 1) / 2.0
         fill_ratio = area / (w * h) if w * h else 0.0
+        # Vertical mass offset within the bbox, in [-0.5, 0.5]: ~0 for centred
+        # shapes (square/circle/diamond), off-centre for triangles.
+        ys_idx = np.nonzero(sub)[0]
+        centroid_dy = float(ys_idx.mean() / (h - 1) - 0.5) if h > 1 else 0.0
         blobs.append({
             "cx": float(cx), "cy": float(cy), "area": area,
             "bbox_w": w, "bbox_h": h, "fill_ratio": fill_ratio,
+            "centroid_dy": centroid_dy,
         })
     return blobs
 
@@ -125,20 +151,74 @@ def _remove_text_rows(blobs: list[dict]) -> tuple[list[dict], int]:
 
 
 def classify_blob_shape(blob: dict) -> tuple[str, str]:
-    """Coarse (marker_type, shape) from blob geometry.
+    """(marker_type, shape family) from blob geometry.
 
-    Filled shapes (■●▲) have a high fill ratio; stroked glyphs (×/+/✶) are thin
-    strokes with a low fill ratio. Finer shape ID at ~15px is unreliable, so we
-    distinguish at the type level (the discriminative, robust split) and leave
-    exact glyph naming to the legend-reading LLM.
+    Filled shapes split into families by extent — square ≈ 1.0, circle ≈ 0.79,
+    triangle/diamond ≈ 0.5 (triangle vs diamond by vertical mass offset) — so
+    each family becomes its own group_key and per-series counts survive the
+    raster path instead of collapsing into one "filled_blob" bucket. Stroked
+    glyphs (×/+/✶) are thin strokes with a low fill ratio. Mapping family →
+    element stays with the legend-reading LLM, as for vector colours.
     """
     fr = blob["fill_ratio"]
     aspect = blob["bbox_w"] / blob["bbox_h"] if blob["bbox_h"] else 1.0
-    if fr >= 0.6:
-        return "filled", "filled_blob"
-    if fr <= 0.45 and 0.6 <= aspect <= 1.7:
+    if fr >= _FILLED_MIN_EXTENT:
+        if fr >= _SQUARE_MIN_EXTENT:
+            return "filled", "filled_square"
+        if fr >= _CIRCLE_MIN_EXTENT:
+            return "filled", "filled_circle"
+        if abs(blob.get("centroid_dy", 0.0)) > _TRIANGLE_CENTROID_OFFSET:
+            return "filled", "filled_triangle"
+        return "filled", "filled_diamond"
+    if 0.6 <= aspect <= 1.7:
         return "stroked", "stroked_glyph"
     return "filled", "ambiguous"
+
+
+def _recover_missed_markers(
+    ink: np.ndarray, kept: list[dict]
+) -> list[tuple[str, float, float]]:
+    """Template-matching recovery pass (scikit-image).
+
+    A marker that overlaps a curve, another marker, or baked-in text merges into
+    a blob the size/aspect filters rightly reject — blob detection alone
+    under-counts exactly where the figure is densest. For each filled shape
+    family with enough clean detections, cross-correlate a median-area exemplar
+    patch over the full ink mask and accept correlation peaks that don't
+    coincide with an already-kept blob. Returns (family, cx, cy) per recovered
+    marker; still estimate-tier — the pre-pass never marks raster pages
+    authoritative.
+    """
+    by_family: dict[str, list[dict]] = defaultdict(list)
+    for b in kept:
+        mtype, family = classify_blob_shape(b)
+        if mtype == "filled" and family != "ambiguous":
+            by_family[family].append(b)
+
+    occupied = [(b["cx"], b["cy"]) for b in kept]
+    img = ink.astype(float)
+    recovered: list[tuple[str, float, float]] = []
+    for family, blobs in sorted(by_family.items()):
+        if len(blobs) < _TEMPLATE_MIN_EXEMPLARS:
+            continue
+        exemplar = sorted(blobs, key=lambda b: b["area"])[len(blobs) // 2]
+        w, h = exemplar["bbox_w"], exemplar["bbox_h"]
+        y0 = max(int(round(exemplar["cy"] - h / 2)), 0)
+        x0 = max(int(round(exemplar["cx"] - w / 2)), 0)
+        template = img[y0:y0 + h, x0:x0 + w]
+        if template.size == 0 or not template.any() or \
+                template.shape[0] >= img.shape[0] or template.shape[1] >= img.shape[1]:
+            continue
+        response = match_template(img, template, pad_input=True)
+        min_dist = max(3, int(0.7 * max(w, h)))
+        peaks = peak_local_max(
+            response, min_distance=min_dist, threshold_abs=_TEMPLATE_MATCH_THRESHOLD
+        )
+        for py, px in peaks:
+            if all(math.hypot(px - ox, py - oy) > min_dist for ox, oy in occupied):
+                occupied.append((float(px), float(py)))
+                recovered.append((family, float(px), float(py)))
+    return recovered
 
 
 def detect_markers(page, bbox, dpi: int = _RENDER_DPI) -> tuple[list[MarkerRecord], list[str]]:
@@ -163,6 +243,16 @@ def detect_markers(page, bbox, dpi: int = _RENDER_DPI) -> tuple[list[MarkerRecor
         mtype, shape = classify_blob_shape(b)
         records.append(MarkerRecord(group_key=shape, marker_type=mtype,
                                     pixel_x=b["cx"], pixel_y=b["cy"]))
+
+    recovered = _recover_missed_markers(_ink_mask(arr), kept)
+    for family, cx, cy in recovered:
+        records.append(MarkerRecord(group_key=family, marker_type="filled",
+                                    pixel_x=cx, pixel_y=cy))
+    if recovered:
+        warnings.append(
+            f"raster: template matching recovered {len(recovered)} marker(s) that "
+            "blob detection lost to overlaps — verify visually."
+        )
 
     warnings.append(
         f"raster: ESTIMATE only — {len(raw)} raw blobs → {len(shaped)} marker-shaped "

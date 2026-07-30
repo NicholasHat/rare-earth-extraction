@@ -8,3 +8,4 @@ python-dotenv>=1.0     # load .env (REQUIRE_PASSWORD, WRITE_PASSWORD, ANTHROPIC_
 pdfplumber>=0.11       # deterministic curve extractor — vector geometry (extraction/curve_extractor)
 numpy>=2.0             # curve extractor — clustering / least-squares fit
 scipy>=1.13            # curve extractor — raster path connected-component blob detection
+scikit-image>=0.24     # curve extractor — raster path template-matching marker recovery
