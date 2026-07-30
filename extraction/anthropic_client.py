@@ -96,7 +96,9 @@ _USER_INSTRUCTION = (
 )
 
 
-def _build_user_content(file_id: str, analysis_block: str | None) -> list[dict]:
+def _build_user_content(
+    file_id: str, analysis_block: str | None, qa_feedback: str | None = None
+) -> list[dict]:
     content: list[dict] = [
         {"type": "document", "source": {"type": "file", "file_id": file_id}},
         {"type": "container_upload", "file_id": file_id},
@@ -105,6 +107,11 @@ def _build_user_content(file_id: str, analysis_block: str | None) -> list[dict]:
     # the model treats the authoritative marker counts as a grounding anchor.
     if analysis_block:
         content.append({"type": "text", "text": analysis_block})
+    # On-demand re-extraction only (review UI): the previous attempt's QA
+    # failures, rendered by runner.qa_feedback_block. Per-run guidance injected
+    # like the pre-pass block — never part of the pinned prompt file.
+    if qa_feedback:
+        content.append({"type": "text", "text": qa_feedback})
     # Cache breakpoint: the code-execution tool loop re-sends this whole turn
     # (system prompt + this paper's PDF) on every internal iteration. Without
     # this marker only the system prompt is cached (its own breakpoint above)
@@ -119,7 +126,14 @@ def _build_user_content(file_id: str, analysis_block: str | None) -> list[dict]:
     return content
 
 
-def _message_kwargs(prompt_text: str, file_id: str, *, model: str, analysis_block: str | None) -> dict:
+def _message_kwargs(
+    prompt_text: str,
+    file_id: str,
+    *,
+    model: str,
+    analysis_block: str | None,
+    qa_feedback: str | None = None,
+) -> dict:
     """Build the model-call kwargs shared by the synchronous and Batch API paths."""
     return dict(
         model=model,
@@ -146,7 +160,7 @@ def _message_kwargs(prompt_text: str, file_id: str, *, model: str, analysis_bloc
                 "total": config.EXTRACTION_TASK_BUDGET_TOKENS,
             }
         },
-        messages=[{"role": "user", "content": _build_user_content(file_id, analysis_block)}],
+        messages=[{"role": "user", "content": _build_user_content(file_id, analysis_block, qa_feedback)}],
     )
 
 
@@ -237,19 +251,25 @@ def extract(
     *,
     model: str | None = None,
     analysis_block: str | None = None,
+    qa_feedback: str | None = None,
 ) -> ExtractResponse:
     """Run one synchronous extraction. Returns the model's text output plus its
     token usage.
 
     `analysis_block` is the optional deterministic curve pre-pass text
     (extraction/curve_prepass.py) injected into the user turn as a count anchor.
+    `qa_feedback` is the optional previous-attempt QA failure block for an
+    on-demand re-extraction (runner.qa_feedback_block).
     """
     model = model or config.EXTRACTION_MODEL
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
     uploaded = client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf"))
     try:
-        kwargs = _message_kwargs(prompt_text, uploaded.id, model=model, analysis_block=analysis_block)
+        kwargs = _message_kwargs(
+            prompt_text, uploaded.id, model=model,
+            analysis_block=analysis_block, qa_feedback=qa_feedback,
+        )
         chain = _run_with_continuations(client, kwargs)
     finally:
         client.beta.files.delete(uploaded.id)

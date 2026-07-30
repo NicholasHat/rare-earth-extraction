@@ -93,12 +93,29 @@ def _postprocess(
     )
 
 
+def qa_feedback_block(report: QAReport, row_count: int) -> str:
+    """Render a previous attempt's QA failures as a user-turn feedback block for
+    an on-demand re-extraction (the review UI's re-extract action). Injected
+    per-run like the curve pre-pass block — never folded into the pinned,
+    versioned prompt file."""
+    lines = [
+        "## QA FEEDBACK ON A PREVIOUS EXTRACTION ATTEMPT",
+        f"A previous extraction of this same paper produced {row_count} rows, but "
+        "automated QA raised the findings below. Redo the full extraction per your "
+        "instructions, specifically resolving each finding — keep whatever the "
+        "findings don't dispute.",
+    ]
+    lines += [f"- [{f.severity.value.upper()}] {f.check}: {f.message}" for f in report.flags]
+    return "\n".join(lines)
+
+
 def extract_paper(
     pdf_bytes: bytes,
     *,
     figure_is_curve: bool = True,
     prompt_version: str | None = None,
     model: str | None = None,
+    qa_feedback: str | None = None,
 ) -> ExtractionResult:
     """Run extraction + QA on one PDF's bytes (synchronous — blocks until done)."""
     bundle = prompt_loader.load_prompt(prompt_version)
@@ -106,7 +123,8 @@ def extract_paper(
     analysis_block, deterministic_counts = _prepass(pdf_bytes)
 
     response = anthropic_client.extract(
-        bundle.text, pdf_bytes, model=model, analysis_block=analysis_block or None
+        bundle.text, pdf_bytes, model=model,
+        analysis_block=analysis_block or None, qa_feedback=qa_feedback,
     )
     return _postprocess(
         response,

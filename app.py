@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -53,6 +54,7 @@ def _save_staging_meta(sha: str, stash: dict, result: ExtractionResult) -> None:
         "doi": stash["doi"],
         "filename": stash["filename"],
         "meta": stash["meta"],
+        "figure_is_curve": stash.get("figure_is_curve", True),
         "prompt_version": result.prompt_version,
         "prompt_sha256": result.prompt_sha256,
         "model": result.model,
@@ -117,6 +119,7 @@ def _restore_staging_queue() -> None:
                 "doi": payload["doi"],
                 "filename": payload["filename"],
                 "meta": payload["meta"],
+                "figure_is_curve": payload.get("figure_is_curve", True),
                 "result": result,
             }
         except Exception:
@@ -230,6 +233,7 @@ def _run_batch(selected: list[dict], figure_is_curve: bool) -> None:
             "doi": p["doi"],
             "meta": p["meta"],
             "filename": p["filename"],
+            "figure_is_curve": figure_is_curve,
             "result": result,
         }
         _save_staging_meta(sha, stash, result)
@@ -329,6 +333,7 @@ def _collect_batch_job(batch_id: str, payload: dict) -> None:
             "doi": paper_meta["doi"],
             "meta": paper_meta["meta"],
             "filename": filename,
+            "figure_is_curve": items[sha].figure_is_curve,
             "result": result,
         }
         _save_staging_meta(sha, stash, result)
@@ -440,7 +445,7 @@ def render_review_queue() -> None:
             key=f"override_{sha}",
         )
 
-    col_a, col_b = st.columns(2)
+    col_a, col_b, col_c = st.columns(3)
     if col_a.button("✅ Approve & merge", type="primary", key=f"approve_{sha}"):
         if not auth.require_write_access():
             st.stop()
@@ -496,6 +501,31 @@ def render_review_queue() -> None:
         pending.pop(sha, None)
         _delete_staging_files(sha)
         st.info(f"{stash['filename']} rejected and discarded (nothing written to the master DB).")
+        st.rerun()
+
+    # The middle option between "approve anyway" and "throw it away": re-run
+    # the extraction with the QA findings injected as feedback, on demand only
+    # (one extra synchronous API call; never automatic — a false-positive flag
+    # shouldn't silently cost money). Replaces this paper's staged result.
+    if result.qa_report.flags and col_c.button(
+        "🔁 Re-extract with QA feedback", key=f"reextract_{sha}"
+    ):
+        if not auth.require_write_access():
+            st.stop()
+        feedback = runner.qa_feedback_block(result.qa_report, len(result.df))
+        with st.spinner("Re-extracting with the QA findings as feedback — this runs one full synchronous extraction..."):
+            try:
+                new_result = runner.extract_paper(
+                    Path(stash["pdf_path"]).read_bytes(),
+                    figure_is_curve=stash.get("figure_is_curve", True),
+                    qa_feedback=feedback,
+                )
+            except Exception as e:
+                st.error(f"Re-extraction failed (previous staged result kept): {e}")
+                st.stop()
+        new_result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
+        stash["result"] = new_result
+        _save_staging_meta(sha, stash, new_result)
         st.rerun()
 
 
