@@ -9,10 +9,14 @@ single-panel colour figure* (it recovers uniform counts there, e.g. Swain & Otu
 Fig. 2 = 9 series × 19). On multi-panel pages one colour spans several panels and
 its markers merge, and title-page logos / legend swatches produce spurious small
 "series". So this pre-pass only treats a page as **authoritative** when its series
-counts are internally consistent (uniform within tolerance); every other detected
-figure page is reported as "verify visually", and raster pages are flagged for the
-model to digitise as usual. This keeps us from ever injecting a wrong count as
-ground truth.
+counts are internally consistent (uniform within tolerance) AND no colour group's
+own marker positions betray a panel merge (`_looks_panel_merged` — a same-colour
+curve repeated across side-by-side panels splits into two balanced x-clusters
+separated by the inter-panel gutter, which count uniformity alone cannot catch
+when every series is inflated by the same factor, as on Swain & Otu Fig. 6);
+every other detected figure page is reported as "verify visually", and raster
+pages are flagged for the model to digitise as usual. This keeps us from ever
+injecting a wrong count as ground truth.
 
 Authoritative pages also carry pre-calibrated (x, y) marker coordinates
 (`FigurePage.markers`), since `curve_extractor.extractor._extract_vector`
@@ -45,6 +49,19 @@ _MIN_MARKERS = 24
 # Series counts on a page are "uniform" (=> one clean single-panel figure we
 # trust) when their spread is within this fraction of the median.
 _UNIFORM_SPREAD_FRAC = 0.15
+# Panel-merge gate (checked on each colour group's raw pixel_x positions; the
+# y-axis is unusable here — a sigmoid isotherm's two plateaus form a natural
+# balanced y-gap that looks exactly like a stacked-panel gutter). A group is
+# panel-suspect when its sorted x positions split at one dominant gap into two
+# BALANCED halves: a genuine sparse data region also has a big gap but splits
+# unbalanced (e.g. 17|2 on Swain Fig. 2), while the same curve drawn once per
+# side-by-side panel splits ~evenly (~15|15 on Swain Fig. 6). Stacked panels
+# with identical x-ranges aren't caught by this (their x values coincide
+# instead of offsetting) — the count-uniformity gate stays the defense there.
+_PANEL_GAP_FACTOR = 3.0     # dominant x-gap must exceed this multiple of the median gap
+_PANEL_BALANCE_FRAC = 0.35  # ...and the smaller side must hold this fraction of markers
+_PANEL_MIN_GROUP = 6        # smaller groups give meaningless split statistics
+_PANEL_MIN_SUSPECTS = 2     # one odd group can be noise; a merge inflates several at once
 
 
 @dataclass
@@ -124,6 +141,35 @@ def _is_uniform(counts: list[int]) -> bool:
     return (max(counts) - min(counts)) <= _UNIFORM_SPREAD_FRAC * med
 
 
+def _group_spans_panels(xs: list[float]) -> bool:
+    """True when one colour group's x positions split at a dominant gap into two
+    balanced halves — the signature of the same curve drawn once per panel."""
+    xs = sorted(xs)
+    gaps = [b - a for a, b in zip(xs, xs[1:])]
+    k = max(range(len(gaps)), key=gaps.__getitem__)
+    others = gaps[:k] + gaps[k + 1:]
+    med = sorted(others)[len(others) // 2] if others else 0.0
+    if med <= 0:
+        return False
+    balance = min(k + 1, len(xs) - (k + 1)) / len(xs)
+    return gaps[k] >= _PANEL_GAP_FACTOR * med and balance >= _PANEL_BALANCE_FRAC
+
+
+def _looks_panel_merged(markers: list[MarkerRecord]) -> bool:
+    """Page-level panel-merge verdict over all colour groups (see the constants
+    above for the per-group rule and its rationale)."""
+    by_group: dict[str, list[float]] = defaultdict(list)
+    for m in markers:
+        by_group[m.group_key].append(m.pixel_x)
+    qualifying = suspect = 0
+    for xs in by_group.values():
+        if len(xs) < _PANEL_MIN_GROUP:
+            continue
+        qualifying += 1
+        suspect += _group_spans_panels(xs)
+    return suspect >= _PANEL_MIN_SUSPECTS and suspect * 2 >= qualifying
+
+
 def _round(x: float) -> float:
     """4 significant figures — plenty for experimental data, keeps the
     injected coordinate block compact."""
@@ -164,7 +210,10 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
             counts = sorted(res.per_group_counts.values(), reverse=True)
             if len(counts) < _MIN_SERIES or sum(counts) < _MIN_MARKERS:
                 continue  # not a data figure (logo / stray graphic)
-            confident = _is_uniform(counts)
+            # Two gates: uniform counts AND no colour group spatially split
+            # across panels — a two-panel figure inflates every series by the
+            # same factor, so uniformity alone passes it (Swain & Otu Fig. 6).
+            confident = _is_uniform(counts) and not _looks_panel_merged(res.markers)
             # Coordinates are only carried for authoritative pages AND when
             # both axes actually calibrated within tolerance — extractor.py's
             # _apply_calibration() writes data_x/data_y even when an axis's

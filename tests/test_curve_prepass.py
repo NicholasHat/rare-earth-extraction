@@ -8,7 +8,12 @@ import pytest
 
 from extraction import anthropic_client
 from extraction.curve_extractor import AxisCalibration, CurveExtractionResult, MarkerRecord
-from extraction.curve_prepass import CurvePrepass, FigurePage, analyze
+from extraction.curve_prepass import (
+    CurvePrepass,
+    FigurePage,
+    _looks_panel_merged,
+    analyze,
+)
 from validation import checks
 from validation.report import Severity
 from validation.schema import ELEMENT_COLUMN, coerce_schema
@@ -125,6 +130,54 @@ def test_analyze_carries_coordinates_when_both_axes_trusted():
     assert "DIGITIZED CURVE DATA" in p.to_prompt_block()
 
 
+# --- panel-merge gate (pure) ------------------------------------------------- #
+
+def _run(group_key: str, xs: list[float]) -> list[MarkerRecord]:
+    return [MarkerRecord(group_key, "filled", pixel_x=x, pixel_y=50.0) for x in xs]
+
+
+def test_panel_merge_flags_balanced_split_groups():
+    # Two colour groups, each the same 15-point run drawn twice, offset by an
+    # inter-panel gutter — the Swain & Otu Fig. 6 shape.
+    one_panel = [float(x) for x in range(0, 75, 5)]
+    two_panels = one_panel + [x + 120.0 for x in one_panel]
+    markers = _run("#ff0000", two_panels) + _run("#00ff00", two_panels)
+    assert _looks_panel_merged(markers) is True
+
+
+def test_panel_merge_ignores_unbalanced_data_gap():
+    # A real single-panel series with a sparse high-x tail (Swain Fig. 2 shape):
+    # the biggest gap is large but splits 18|1, not ~evenly.
+    xs = [float(x) for x in range(0, 90, 5)] + [200.0]
+    markers = _run("#ff0000", xs) + _run("#00ff00", xs)
+    assert _looks_panel_merged(markers) is False
+
+
+def test_panel_merge_needs_more_than_one_suspect_group():
+    one_panel = [float(x) for x in range(0, 75, 5)]
+    split = one_panel + [x + 120.0 for x in one_panel]
+    clean = [float(x) for x in range(0, 150, 5)]
+    markers = _run("#ff0000", split) + _run("#00ff00", clean) + _run("#0000ff", clean)
+    assert _looks_panel_merged(markers) is False
+
+
+def test_analyze_downgrades_panel_merged_page():
+    # Uniform counts (the old gate passes) but both groups are panel-split —
+    # the page must land in unverified_pages with no authoritative counts.
+    one_panel = [float(x) for x in range(0, 75, 5)]
+    two_panels = one_panel + [x + 120.0 for x in one_panel]
+    markers = _run("#ff0000", two_panels) + _run("#00ff00", two_panels)
+    counts = {"#ff0000": 30, "#00ff00": 30}
+    fake = _fake_result(markers, _OK_CAL, _OK_CAL, counts)
+    with patch("extraction.curve_prepass.extract_curves", return_value=fake):
+        with patch("pdfplumber.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.pages = [None]
+            p = analyze(b"fake pdf bytes")
+    assert p.confident_pages == []
+    assert len(p.unverified_pages) == 1
+    assert p.authoritative_counts == []
+
+
 def test_authoritative_counts_only_from_confident_pages():
     p = CurvePrepass(
         confident_pages=[FigurePage(2, [19, 19], confident=True)],
@@ -189,3 +242,15 @@ def test_prepass_on_swain_marks_clean_figure_authoritative():
     assert any(fp.series_counts == [19] * 9 for fp in p.confident_pages)
     assert 19 in p.authoritative_counts
     assert "authoritative" in p.to_prompt_block()
+
+
+@pytest.mark.skipif(not _SWAIN.exists(), reason="Swain & Otu PDF not present")
+def test_prepass_on_swain_downgrades_two_panel_fig6_page():
+    # Page 5 holds Fig. 6, a two-panel figure whose same-colour curves merge
+    # into inflated counts ([30, 30, 29, 26] vs the true ~15/panel). Uniformity
+    # alone passed it; the panel-merge gate must keep it out of authoritative.
+    from extraction.curve_prepass import analyze
+    p = analyze(_SWAIN.read_bytes())
+    assert all(fp.page_index != 5 for fp in p.confident_pages)
+    assert any(fp.page_index == 5 for fp in p.unverified_pages)
+    assert 30 not in p.authoritative_counts
