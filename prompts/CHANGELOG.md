@@ -4,7 +4,19 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v8 — deterministic curve pre-pass becomes a digitizer (current pinned default)
+## extraction_v9 — log-log concentration sweeps are data, not always derived (current pinned default)
+- Step 1's y-axis classification no longer skips every `log D` vs
+  `log[extractant]` plot as a derived re-plot. Found on Swain & Otu 2011: its
+  Fig. 5 holds concentration sweeps at equilibrium pH 1.25 and 2.50 that appear
+  in **no other figure** — the old blanket skip rule silently dropped them, and
+  only the pH 1.75 sweep (Fig. 4) made it into the dataset. v9 digitises the
+  log-log series whose conditions no other figure reports, converting both axes
+  (`[ext] = 10^x`, `D = 10^y` → `%E`), and still skips the series that merely
+  duplicate an already-digitised sweep.
+- Adds a matching "Common pitfalls" row. Everything else (the v8 DIGITIZED
+  CURVE DATA shortcut, the v7 positional wire format, Steps 0–10) is unchanged.
+
+## extraction_v8 — deterministic curve pre-pass becomes a digitizer
 - `extraction/curve_prepass.py` no longer discards the calibrated (x, y) marker
   coordinates the vector path already computes (`curve_extractor.extractor`
   runs axis calibration for every vector page, but the pre-pass previously
