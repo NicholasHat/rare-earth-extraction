@@ -57,3 +57,24 @@ def test_reupload_same_paper_reuses_paper_row(conn):
     best = extractions_repo.current_best(conn)
     assert len(best) == 10
     assert best["prompt_run_id"].nunique() == 1
+
+
+def test_current_best_survives_two_digit_version_numbers(conn):
+    """v10 must beat v9. Sorting prompt_version as TEXT gets this backwards."""
+    _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+    newer = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v10")
+    best = extractions_repo.current_best(conn)
+    assert best["prompt_run_id"].unique().tolist() == [newer["prompt_run_id"]]
+
+
+def test_current_best_follows_approval_order_so_a_version_can_be_rolled_back(conn):
+    """Re-approving an older version makes it current again — the rollback path."""
+    older = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v5")
+    _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+    conn.execute(
+        "UPDATE prompt_runs SET reviewed_at = datetime('now', '+1 hour') "
+        "WHERE prompt_run_id = ?",
+        (older["prompt_run_id"],),
+    )
+    best = extractions_repo.current_best(conn)
+    assert best["prompt_run_id"].unique().tolist() == [older["prompt_run_id"]]

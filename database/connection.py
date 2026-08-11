@@ -24,6 +24,13 @@ _PROMPT_RUN_USAGE_COLUMNS = {
 }
 
 
+# Views defined in schema.sql. Their CREATE ... IF NOT EXISTS is a no-op on a DB
+# that already has them, so an edited view definition would never reach an
+# existing master.db. Views hold no data — dropping them first is free and makes
+# schema.sql authoritative for every future edit.
+_VIEWS = ("v_current_best",)
+
+
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
@@ -37,6 +44,8 @@ def _ensure_prompt_run_usage_columns(conn: sqlite3.Connection) -> None:
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
+    for view in _VIEWS:
+        conn.execute(f"DROP VIEW IF EXISTS {view}")
     conn.executescript(_SCHEMA_SQL.read_text())
     _ensure_prompt_run_usage_columns(conn)
     conn.commit()

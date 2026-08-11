@@ -118,14 +118,21 @@ CREATE TABLE IF NOT EXISTS review_log (
 );
 
 -- v_current_best: the rows Pillars B & C read. For each paper, the extractions from
--- the MOST RECENT prompt_version that has an APPROVED run. Coexistence resolved here.
+-- its MOST RECENTLY APPROVED run. Coexistence resolved here.
+--
+-- Ordering is by approval time, not by prompt_version: prompt_version is TEXT, so
+-- sorting it puts 'extraction_v9' above 'extraction_v10' (and any dotted-version
+-- arithmetic collides v5.1 with v5.10). Approval time needs no parsing, assumes
+-- nothing about the version-string format, and lets a reviewer roll back a
+-- regressed version by re-approving an older one. reviewed_at has second
+-- resolution, so prompt_run_id breaks ties within the same second.
 CREATE VIEW IF NOT EXISTS v_current_best AS
 WITH best_run AS (
     SELECT pr.paper_id,
            pr.prompt_run_id,
            ROW_NUMBER() OVER (
                PARTITION BY pr.paper_id
-               ORDER BY pr.prompt_version DESC, pr.reviewed_at DESC
+               ORDER BY pr.reviewed_at DESC, pr.prompt_run_id DESC
            ) AS rn
     FROM prompt_runs pr
     WHERE pr.status = 'approved'
