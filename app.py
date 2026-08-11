@@ -489,10 +489,19 @@ def render_review_queue() -> None:
         # Export the approved per-paper spreadsheet artifact.
         export_path = config.EXPORTS_DIR / f"paper_{summary['paper_id']}.xlsx"
         edited_clean.to_excel(export_path, index=False, engine="openpyxl")
-        st.success(
+        merged_msg = (
             f"Merged {summary['rows_merged']} rows → paper_id={summary['paper_id']}, "
             f"prompt_run_id={summary['prompt_run_id']}. Export: {export_path.name}"
         )
+        if summary["superseded_run_id"] is not None:
+            # Retiring a previously approved run changes what the calculator and
+            # assistant see, so don't let it happen silently.
+            merged_msg += (
+                f" Superseded the earlier approved run "
+                f"(prompt_run_id={summary['superseded_run_id']}) for this prompt version; "
+                "its rows stay in the DB but are no longer current."
+            )
+        st.success(merged_msg)
         pending.pop(sha, None)
         _delete_staging_files(sha)
         st.rerun()

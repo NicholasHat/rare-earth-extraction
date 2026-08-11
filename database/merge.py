@@ -42,8 +42,11 @@ def commit_extraction(
     """Insert/locate the paper, record an approved run, and merge its rows.
 
     If a paper with the same hash/DOI already exists, it is reused (the new run
-    is recorded against it — the coexistence path). Returns a summary dict with
-    the new paper_id and prompt_run_id.
+    is recorded against it — the coexistence path). Approving a paper under a
+    prompt version it was already approved under retires the earlier run rather
+    than failing; its rows stay in the DB but stop being current. Returns a
+    summary dict with the paper_id, prompt_run_id, and the superseded
+    prompt_run_id (None on a first approval).
 
     The whole thing runs in one transaction; any error rolls everything back.
     """
@@ -86,6 +89,15 @@ def commit_extraction(
             n_rows = extractions_repo.insert_extractions(conn, paper_id, run_id, df)
             extractions_repo.insert_text_endpoints(conn, paper_id, run_id, text_endpoints)
 
+            # Only one approved run per (paper, prompt_version) is allowed, so
+            # retire the incumbent before approving this one — otherwise
+            # re-approving the same version raises a bare UNIQUE violation.
+            superseded_run_id = review_repo.supersede_approved_run(
+                conn,
+                paper_id=paper_id,
+                prompt_version=prompt_version,
+                replaced_by=run_id,
+            )
             review_repo.set_run_status(conn, run_id, "approved")
             log_note = note
             if override and not qa_passed:
@@ -98,6 +110,11 @@ def commit_extraction(
                 action="approve",
                 note=log_note,
             )
-        return {"paper_id": paper_id, "prompt_run_id": run_id, "rows_merged": n_rows}
+        return {
+            "paper_id": paper_id,
+            "prompt_run_id": run_id,
+            "rows_merged": n_rows,
+            "superseded_run_id": superseded_run_id,
+        }
     except sqlite3.IntegrityError as e:
         raise RuntimeError(f"merge failed (constraint): {e}") from e

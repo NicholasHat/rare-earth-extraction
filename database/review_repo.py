@@ -58,6 +58,43 @@ def set_run_status(conn: sqlite3.Connection, prompt_run_id: int, status: str) ->
     )
 
 
+def supersede_approved_run(
+    conn: sqlite3.Connection, *, paper_id: int, prompt_version: str, replaced_by: int
+) -> int | None:
+    """Demote the currently-approved run for (paper, prompt_version), if any.
+
+    `idx_one_approved_per_version` allows only one approved run per paper per
+    prompt version, so re-approving the same version — what "Re-extract with QA
+    feedback" produces, since it reuses the pinned version — has to retire the
+    previous one first. Returns the demoted prompt_run_id, or None if this is
+    the first approval of this version.
+
+    The demoted run keeps its rows, raw_response and review history; it simply
+    stops being current. Status becomes 'rejected' because the CHECK constraint
+    admits no 'superseded' value and widening it would mean rebuilding the table
+    on every existing DB — the review_log entry written here is what records
+    that this was a supersession rather than a reviewer turning the run down.
+    """
+    row = conn.execute(
+        "SELECT prompt_run_id FROM prompt_runs "
+        "WHERE paper_id = ? AND prompt_version = ? AND status = 'approved'",
+        (paper_id, prompt_version),
+    ).fetchone()
+    if row is None:
+        return None
+
+    old_run_id = int(row[0])
+    set_run_status(conn, old_run_id, "rejected")
+    log_review(
+        conn,
+        paper_id=paper_id,
+        prompt_run_id=old_run_id,
+        action="reject",
+        note=f"superseded by prompt_run {replaced_by} (same prompt version, re-reviewed)",
+    )
+    return old_run_id
+
+
 def log_review(
     conn: sqlite3.Connection,
     *,

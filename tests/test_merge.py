@@ -59,6 +59,50 @@ def test_reupload_same_paper_reuses_paper_row(conn):
     assert best["prompt_run_id"].nunique() == 1
 
 
+def test_reapproving_the_same_version_supersedes_instead_of_failing(conn):
+    """"Re-extract with QA feedback" reuses the pinned prompt version, so the
+    improved result lands on (paper, version) that is already approved."""
+    first = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+    second = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+
+    assert second["superseded_run_id"] == first["prompt_run_id"]
+    statuses = dict(conn.execute("SELECT prompt_run_id, status FROM prompt_runs"))
+    assert statuses[first["prompt_run_id"]] == "rejected"
+    assert statuses[second["prompt_run_id"]] == "approved"
+
+    # The retired run keeps its rows; they just stop being current.
+    best = extractions_repo.current_best(conn)
+    assert best["prompt_run_id"].unique().tolist() == [second["prompt_run_id"]]
+    total = conn.execute("SELECT COUNT(*) FROM extractions").fetchone()[0]
+    assert total == 20
+
+
+def test_supersession_is_recorded_in_the_review_log(conn):
+    """Status alone can't distinguish 'superseded' from 'a reviewer said no'."""
+    first = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+    second = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+
+    logged = conn.execute(
+        "SELECT action, note FROM review_log WHERE prompt_run_id = ?",
+        (first["prompt_run_id"],),
+    ).fetchall()
+    actions = {row["action"] for row in logged}
+    assert actions == {"approve", "reject"}
+    assert any(
+        f"superseded by prompt_run {second['prompt_run_id']}" in (row["note"] or "")
+        for row in logged
+    )
+
+
+def test_a_different_version_coexists_rather_than_superseding(conn):
+    first = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
+    second = _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v10")
+
+    assert second["superseded_run_id"] is None
+    statuses = dict(conn.execute("SELECT prompt_run_id, status FROM prompt_runs"))
+    assert statuses[first["prompt_run_id"]] == "approved"
+
+
 def test_current_best_survives_two_digit_version_numbers(conn):
     """v10 must beat v9. Sorting prompt_version as TEXT gets this backwards."""
     _commit(conn, sha="hashA", doi="10.1/a", prompt_version="extraction_v9")
