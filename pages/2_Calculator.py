@@ -19,10 +19,12 @@ st.set_page_config(page_title="Extractant Calculator", layout="wide")
 st.title("Extractant Calculator")
 st.caption("Pillar B — solve-for-the-blank conversions. No API calls, no write access required.")
 
-# Ensure the data dir + schema exist (also lets the DISTINCT query below run on a fresh DB).
+# Ensure the data dir + schema exist. Required before the read-only open below:
+# SQLite's mode=ro will not create a missing file, so a fresh install would
+# otherwise fail here rather than showing an empty extractant list.
 connection.init_db()
 
-conn = connection.get_conn()
+conn = connection.get_readonly_conn()
 try:
     known_extractants = [
         r[0]

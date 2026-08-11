@@ -27,7 +27,7 @@ There is no lint/format config and no `pytest.ini` — `conftest.py` just puts t
 
 ## Environment
 
-Config is read once in `config.py` from `.env` at the repo root. Keys: `ANTHROPIC_API_KEY` (required for extraction/assistant, not for tests), `REQUIRE_PASSWORD`/`WRITE_PASSWORD` (write gate), `EXTRACTION_PROMPT_VERSION` (default `extraction_v9`), `EXTRACTION_MODEL` (`claude-opus-4-8`), `ASSISTANT_MODEL` (`claude-haiku-4-5-...`), `EXTRACTION_TASK_BUDGET_TOKENS` (default `500000` — a self-moderated backstop on total tokens per extraction call, not a hard cap; keep it generous, a too-tight budget makes the model silently under-digitize a multi-element paper instead of erroring). Never hardcode paths or model IDs — add them to `config.py`.
+Config is read once in `config.py` from `.env` at the repo root. Keys: `ANTHROPIC_API_KEY` (required for extraction/assistant, not for tests), `REQUIRE_PASSWORD`/`WRITE_PASSWORD` (write gate), `EXTRACTION_PROMPT_VERSION` (default `extraction_v9`), `EXTRACTION_MODEL` (default `claude-sonnet-5` — same tool support as Opus 4.8 for this pipeline: code execution, Files API, task budgets, 1h cache TTL, batches, and the same 2576px high-resolution vision tier that figure digitization depends on), `ASSISTANT_MODEL` (`claude-haiku-4-5-...`), `EXTRACTION_TASK_BUDGET_TOKENS` (default `500000` — a self-moderated backstop on total tokens per extraction call, not a hard cap; keep it generous, a too-tight budget makes the model silently under-digitize a multi-element paper instead of erroring). Never hardcode paths or model IDs — add them to `config.py`.
 
 ## Architecture: three pillars over one DB
 
