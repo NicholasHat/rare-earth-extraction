@@ -340,8 +340,9 @@ def collect_batch_results(
     `pdf_bytes` (no need to re-upload). Only used to rebuild the request for a
     paused item (below); an item that finished cleanly never touches it.
 
-    A result that errored/canceled/expired is surfaced as a RuntimeError value
-    rather than raised, so one bad paper doesn't lose the rest of the batch.
+    A result that errored/canceled/expired — or that raises while being read or
+    continued — is surfaced as an Exception value rather than raised, so one bad
+    paper doesn't lose the rest of the batch.
 
     A paused item (stop_reason=pause_turn) is NOT treated as a terminal
     failure: batch requests get a HIGHER per-turn iteration cap than
@@ -375,7 +376,15 @@ def collect_batch_results(
                 out[result.custom_id] = _response_from_message_chain(chain)
             else:
                 out[result.custom_id] = _response_from_message(message)
-        except RuntimeError as e:
+        except Exception as e:
+            # Deliberately broad. The continuation above makes live API calls,
+            # so this catches anthropic.RateLimitError / APIStatusError /
+            # APIConnectionError as well as our own RuntimeErrors — none of
+            # which are RuntimeError subclasses. Letting one escape would
+            # discard every result already collected in `out`, and the retry
+            # re-runs (and re-bills) the synchronous continuations that had
+            # already succeeded. The error is not swallowed: it is returned as
+            # this paper's value and surfaced in the review queue.
             out[result.custom_id] = e
     return out
 

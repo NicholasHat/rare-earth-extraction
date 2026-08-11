@@ -246,7 +246,11 @@ def collect_batch(
                 prompt_sha256=item.prompt_sha256,
                 model=item.model,
             )
-        except parse_output.ParseError as e:
+        except Exception as e:
+            # Broad for the same reason as collect_batch_results: _postprocess
+            # does parsing, schema coercion and QA, and anything it raises for
+            # ONE paper must not discard the papers already parsed above (a
+            # re-collect re-bills any synchronous continuations that succeeded).
             out[custom_id] = e
     return out
 

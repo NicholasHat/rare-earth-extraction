@@ -111,3 +111,37 @@ def test_collect_batch_results_surfaces_errored_item():
 
     assert isinstance(out["sha1"], RuntimeError)
     assert "did not succeed" in str(out["sha1"])
+
+
+class _NotARuntimeError(Exception):
+    """Stands in for anthropic.RateLimitError / APIStatusError / APIConnectionError,
+    none of which subclass RuntimeError."""
+
+
+def test_collect_batch_results_isolates_a_failed_continuation():
+    """An SDK error while continuing ONE paused item must not discard the
+    already-collected results — a re-collect re-bills every continuation."""
+    paused = SimpleNamespace(
+        custom_id="sha_paused",
+        result=SimpleNamespace(type="succeeded", message=_msg("pause_turn", "partial")),
+    )
+    finished = SimpleNamespace(
+        custom_id="sha_ok",
+        result=SimpleNamespace(type="succeeded", message=_msg("end_turn", "all good")),
+    )
+    items = [
+        ("sha_paused", "p", "file_1", None, "claude-sonnet-5"),
+        ("sha_ok", "p", "file_2", None, "claude-sonnet-5"),
+    ]
+
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = MagicMock()
+        client.beta.messages.stream.side_effect = _NotARuntimeError("overloaded")
+        # The paused item is collected FIRST, so an escaping exception would
+        # take the finished item down with it.
+        client.beta.messages.batches.results.return_value = [paused, finished]
+        mock_anthropic.return_value = client
+        out = collect_batch_results("batch_1", items)
+
+    assert isinstance(out["sha_paused"], _NotARuntimeError)
+    assert out["sha_ok"].text == "all good"
