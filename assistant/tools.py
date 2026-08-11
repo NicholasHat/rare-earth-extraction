@@ -40,7 +40,13 @@ def query_database(conn: sqlite3.Connection, sql: str) -> str:
     deadline = time.monotonic() + _QUERY_TIMEOUT_S
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 1000)
     try:
-        rows = conn.execute(safe_sql).fetchall()
+        # The authorizer, not guard(), is what actually enforces the allow-list:
+        # it sees every relation the compiled statement touches, however the
+        # query was written (comma joins, table-valued functions, subqueries).
+        with sql_guard.authorized(conn):
+            rows = conn.execute(safe_sql).fetchall()
+    except sql_guard.SQLGuardError as e:
+        return json.dumps({"error": str(e)})
     except sqlite3.Error as e:
         return json.dumps({"error": f"query failed: {e}"})
     finally:

@@ -1,7 +1,10 @@
 """Exhaustive tests for assistant.sql_guard — the hard backstop independent
 of the system prompt (README §8)."""
+import json
+
 import pytest
 
+from assistant import sql_guard, tools
 from assistant.sql_guard import SQLGuardError, guard
 
 
@@ -94,3 +97,64 @@ def test_sql_comment_does_not_smuggle_forbidden_keyword_past_detection():
 def test_quoted_column_name_with_percent_does_not_break_guard():
     out = guard('SELECT "Extract%" FROM v_current_best WHERE "Extract%" > 90')
     assert "LIMIT" in out
+
+
+def test_replace_function_is_not_mistaken_for_a_write():
+    """`replace()` is an ordinary string function; only `REPLACE INTO` writes,
+    and that can't get past the leading SELECT/WITH check."""
+    out = guard("""SELECT replace("Extractant", 'a', 'b') FROM v_current_best""")
+    assert "LIMIT" in out
+
+
+def test_cte_may_not_shadow_an_allow_listed_relation():
+    """SQLite lets a CTE shadow a real view, and the authorizer would then
+    report reads inside it as coming from that view."""
+    with pytest.raises(SQLGuardError, match="may not reuse"):
+        guard("WITH v_current_best AS (SELECT * FROM extractions) SELECT * FROM v_current_best")
+
+
+# --- the authorizer: enforcement the regex pre-check cannot do ----------------
+
+def _run(conn, sql):
+    with sql_guard.authorized(conn):
+        return conn.execute(guard(sql)).fetchall()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Old-style comma joins: _TABLE_REF_RE only sees the table after FROM.
+        "SELECT * FROM v_current_best, extractions",
+        "SELECT * FROM papers, sqlite_master",
+        "SELECT * FROM papers p, review_log r",
+        # Table-valued function: no FROM/JOIN keyword precedes it.
+        "SELECT * FROM papers, pragma_table_info('extractions')",
+        # Correlated subquery.
+        "SELECT (SELECT COUNT(*) FROM extractions) AS n FROM papers",
+    ],
+)
+def test_authorizer_denies_relations_the_regex_pre_check_misses(conn, sql):
+    with pytest.raises(SQLGuardError, match="allow-list"):
+        _run(conn, sql)
+
+
+def test_authorizer_allows_reading_through_an_allow_listed_view(conn):
+    """v_current_best is a view over `extractions`; expanding it reads the raw
+    table, which must stay allowed even though a direct read is not."""
+    assert _run(conn, "SELECT * FROM v_current_best") == []
+
+
+def test_authorizer_allows_a_plain_cte(conn):
+    assert _run(conn, "WITH x AS (SELECT paper_id FROM papers) SELECT * FROM x") == []
+
+
+def test_authorizer_is_uninstalled_after_a_denial(conn):
+    """A denial must not leave the shared connection unusable."""
+    with pytest.raises(SQLGuardError):
+        _run(conn, "SELECT * FROM papers, review_log")
+    assert conn.execute("SELECT COUNT(*) FROM extractions").fetchone()[0] == 0
+
+
+def test_query_database_reports_a_denied_relation_instead_of_crashing(conn):
+    out = json.loads(tools.query_database(conn, "SELECT * FROM v_current_best, extractions"))
+    assert "allow-list" in out["error"]
