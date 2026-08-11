@@ -22,8 +22,9 @@ Two ways to run an extraction, sharing the same request shape (_message_kwargs):
     continuation (`_continue_until_done`) rather than surfaced as an error.
     See the flag on that section below before relying on it for a full run.
 
-A `stop_reason` of `max_tokens` or `refusal` is always a hard failure (surfaced
-as a specific RuntimeError, not a bare parse error) — see `_check_stop_reason`.
+Only `end_turn` counts as a finished response. Every other `stop_reason` is a
+hard failure (surfaced as a specific RuntimeError, not a bare parse error) —
+see `_check_stop_reason`.
 
 Context editing (`clear_tool_uses_20250919`) was tried here and reverted: it
 clears stale tool-use/tool-result pairs mid-conversation, but that clearing
@@ -66,24 +67,46 @@ def _usage_from_message(message) -> tuple[int, int, int, int]:
     )
 
 
+_STOP_REASON_ERRORS = {
+    "refusal": "model declined the request (stop_reason=refusal)",
+    "max_tokens": (
+        "model output was truncated at max_tokens (128000) before finishing — "
+        "the paper likely needs more figures/elements digitized than fit in one "
+        "turn's output"
+    ),
+    "model_context_window_exceeded": (
+        "the conversation outgrew the model's context window before finishing — "
+        "the code-execution loop re-accumulates the PDF and transcript on every "
+        "internal iteration, so this is most likely a paper needing many rounds"
+    ),
+    "pause_turn": (
+        "server-side tool loop paused (stop_reason=pause_turn) with no automatic "
+        "continuation available here — this paper needs more internal tool "
+        "iterations than one turn allows"
+    ),
+}
+
+
 def _check_stop_reason(stop_reason: str, *, can_continue: bool = False) -> None:
     """Raise a specific, actionable error for a non-finished response instead of
     letting truncated/declined output fall through to an opaque JSON parse
-    failure downstream."""
-    if stop_reason == "refusal":
-        raise RuntimeError("model declined the request (stop_reason=refusal)")
-    if stop_reason == "max_tokens":
-        raise RuntimeError(
-            "model output was truncated at max_tokens (128000) before finishing — "
-            "the paper likely needs more figures/elements digitized than fit in one "
-            "turn's output"
-        )
-    if stop_reason == "pause_turn" and not can_continue:
-        raise RuntimeError(
-            "server-side tool loop paused (stop_reason=pause_turn) with no automatic "
-            "continuation available here — this paper needs more internal tool "
-            "iterations than one turn allows"
-        )
+    failure downstream.
+
+    Whitelist, not blacklist: only `end_turn` (and a continuable `pause_turn`)
+    means the response is complete. Anything else — including a stop reason the
+    API gains after this was written — raises. Falling through is not a safe
+    default here: parse_output walks the fenced JSON blocks newest-first and
+    returns the first that parses, so a response truncated mid-block silently
+    falls back to an earlier, smaller table and reaches the reviewer looking
+    like a complete extraction.
+    """
+    if stop_reason == "end_turn" or (stop_reason == "pause_turn" and can_continue):
+        return
+    raise RuntimeError(
+        _STOP_REASON_ERRORS.get(stop_reason)
+        or f"model stopped with an unrecognized stop_reason={stop_reason!r} before "
+        "finishing — treating the response as incomplete rather than parsing it"
+    )
 
 # A short instruction in the user turn; the real rules live in the system prompt.
 _USER_INSTRUCTION = (

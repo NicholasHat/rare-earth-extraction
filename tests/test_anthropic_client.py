@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from extraction import anthropic_client
+from extraction import anthropic_client, parse_output
 from extraction.anthropic_client import _continue_until_done, collect_batch_results
 
 
@@ -61,6 +61,42 @@ def test_continue_until_done_raises_after_max_continuations():
     chain = [_msg("pause_turn")]
     with pytest.raises(RuntimeError, match="did not finish"):
         _continue_until_done(client, _KWARGS, chain)
+
+
+def test_check_stop_reason_accepts_only_a_finished_turn():
+    assert anthropic_client._check_stop_reason("end_turn") is None
+    assert anthropic_client._check_stop_reason("pause_turn", can_continue=True) is None
+
+
+@pytest.mark.parametrize(
+    "stop_reason, expected",
+    [
+        ("refusal", "declined"),
+        ("max_tokens", "truncated"),
+        ("model_context_window_exceeded", "context window"),
+        ("pause_turn", "paused"),
+    ],
+)
+def test_check_stop_reason_reports_each_known_failure_specifically(stop_reason, expected):
+    with pytest.raises(RuntimeError, match=expected):
+        anthropic_client._check_stop_reason(stop_reason)
+
+
+def test_check_stop_reason_rejects_a_stop_reason_it_has_never_seen():
+    """Whitelist, not blacklist: an unknown stop reason means an incomplete
+    response, and parse_output would happily accept a truncated one."""
+    with pytest.raises(RuntimeError, match="unrecognized stop_reason"):
+        anthropic_client._check_stop_reason("some_future_stop_reason")
+
+
+def test_truncated_response_would_parse_as_complete_if_the_stop_reason_slipped_through():
+    """Why the whitelist matters: the parser falls back to the newest block that
+    parses, so a run cut off mid-table yields a smaller table, not an error."""
+    truncated = (
+        '```json\n{"columns": ["a"], "rows": [[1]]}\n```\n'
+        '```json\n{"columns": ["a"], "rows": [[1], [2], [3'  # cut off mid-write
+    )
+    assert parse_output._extract_json_object(truncated) == {"columns": ["a"], "rows": [[1]]}
 
 
 def test_collect_batch_results_continues_paused_batch_item():
