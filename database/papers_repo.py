@@ -4,6 +4,17 @@ from __future__ import annotations
 import sqlite3
 
 
+def canonical_doi(doi: str | None) -> str | None:
+    """Canonical DB form of a DOI (dedup key): stripped, lowercased, '' -> None.
+
+    Every read or write of `papers.doi` must go through this — lookup and
+    insert disagreeing on normalization would silently break dedup.
+    """
+    if not doi or not doi.strip():
+        return None
+    return doi.strip().lower()
+
+
 def find_by_hash(conn: sqlite3.Connection, content_sha256: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM papers WHERE content_sha256 = ?", (content_sha256,)
@@ -11,11 +22,10 @@ def find_by_hash(conn: sqlite3.Connection, content_sha256: str) -> sqlite3.Row |
 
 
 def find_by_doi(conn: sqlite3.Connection, doi: str | None) -> sqlite3.Row | None:
-    if not doi:
+    doi = canonical_doi(doi)
+    if doi is None:
         return None
-    return conn.execute(
-        "SELECT * FROM papers WHERE doi = ?", (doi.strip().lower(),)
-    ).fetchone()
+    return conn.execute("SELECT * FROM papers WHERE doi = ?", (doi,)).fetchone()
 
 
 def get(conn: sqlite3.Connection, paper_id: int) -> sqlite3.Row | None:
@@ -46,7 +56,7 @@ def insert(
         """,
         (
             reference_no,
-            doi.strip().lower() if doi else None,
+            canonical_doi(doi),
             title,
             content_sha256,
             original_filename,
