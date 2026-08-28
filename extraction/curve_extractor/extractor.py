@@ -76,6 +76,15 @@ def _extract_vector(page, page_index, legend_bbox) -> CurveExtractionResult:
             per_group[key] = len(assembled)
             recs += assembled
 
+    # Monochrome series use stroked glyphs (×/+/✶) instead of colour; these
+    # coexist with filled/colour series on the same page (plan §1 "mixed
+    # marker geometries"), so both paths always run.
+    segments = detect.collect_stroked_segments(page, frame, legend_bbox=legend_bbox)
+    for key, recs_g in markers.group_stroked_by_shape(markers.assemble_stroked(segments)).items():
+        if len(recs_g) >= markers.MIN_MARKERS_PER_GROUP:
+            per_group[key] = len(recs_g)
+            recs += recs_g
+
     warns = markers.detect_merge_warnings(recs, per_group)
     x_cal = y_cal = None
     if frame:

@@ -61,11 +61,15 @@ def collect_stroked_segments(page, frame, *, max_len_pt=12.0, legend_bbox=None) 
     """Short line segments — candidate fragments of ×/+/✶ glyphs (monochrome path).
 
     Long lines (connecting curves, axis frame, gridlines) are excluded by length.
+    Axis tick marks are also short, but they sit on/outside the frame edge rather
+    than inside the plot area, so restricting to `frame` excludes them too.
     """
     out = []
     for ln in page.lines:
         length = ((ln["x1"] - ln["x0"]) ** 2 + (ln["bottom"] - ln["top"]) ** 2) ** 0.5
         if length > max_len_pt:
+            continue
+        if frame and not _inside(ln, frame):
             continue
         if legend_bbox and _inside(ln, legend_bbox):
             continue

@@ -92,6 +92,84 @@ def assemble_filled(group_key: str, group_objs: list[dict]) -> list[MarkerRecord
     return records
 
 
+def _segment_midpoint(seg) -> tuple[float, float]:
+    return ((seg["x0"] + seg["x1"]) / 2, (seg["top"] + seg["bottom"]) / 2)
+
+
+def _segment_length(seg) -> float:
+    return math.hypot(seg["x1"] - seg["x0"], seg["bottom"] - seg["top"])
+
+
+def _calibrate_eps_stroked(segments: list[dict]) -> float:
+    """Assembly eps for stroked glyphs — a fraction of the fragment's own arm
+    length (plan §4.2), so it stays constant across a curve's density instead
+    of scaling with inter-marker spacing like the originally-diagnosed bug."""
+    lengths = [_segment_length(s) for s in segments]
+    return 0.6 * float(np.median(lengths)) if lengths else 3.0
+
+
+def _segment_angle_deg(seg) -> float:
+    return math.degrees(math.atan2(seg["bottom"] - seg["top"], seg["x1"] - seg["x0"])) % 180
+
+
+def _round_to(angle_deg: float, step: int) -> int:
+    return round(angle_deg / step) % (180 // step) * step
+
+
+def classify_glyph_shape(segs: list[dict]) -> str | None:
+    """Shape class of an assembled stroked glyph, from its fragments' angles
+    (mod 180 — a line has no direction): '+' = one ~0deg + one ~90deg segment,
+    '×' = one ~45deg + one ~135deg segment, '✶' = three fragments ~60deg apart.
+    Anything else (e.g. two near-parallel fragments, a coincidental crossing of
+    unrelated strokes like axis ticks) isn't a recognized glyph -> None, so
+    assemble_stroked discards it as noise rather than mislabelling it."""
+    if len(segs) == 2:
+        angles = sorted(_round_to(_segment_angle_deg(s), 45) for s in segs)
+        if angles == [0, 90]:
+            return "plus"
+        if angles == [45, 135]:
+            return "cross"
+        return None
+    if len(segs) == 3:
+        angles = sorted(_round_to(_segment_angle_deg(s), 60) for s in segs)
+        if angles == [0, 60, 120]:
+            return "star"
+        return None
+    return None
+
+
+def assemble_stroked(segments: list[dict]) -> list[MarkerRecord]:
+    """Assemble monochrome ×/+/✶ glyphs from their 2-3 line-segment fragments
+    and classify each assembled glyph's shape (plan §4.2, §2 "monochrome
+    figures: identity = marker shape class"). Unlike the filled path, identity
+    isn't known until after assembly, so this clusters fragments globally on a
+    single geometry-derived eps first, then classifies each resulting glyph."""
+    if not segments:
+        return []
+    eps = _calibrate_eps_stroked(segments)
+    pts = np.array([_segment_midpoint(s) for s in segments])
+    records = []
+    for idxs in _single_linkage(pts, eps):
+        if len(idxs) < 2:
+            continue  # a lone unmatched fragment is noise, not an assembled glyph
+        glyph_segs = [segments[i] for i in idxs]
+        shape = classify_glyph_shape(glyph_segs)
+        if shape is None:
+            continue  # fragments crossed/clustered but don't form a known glyph
+        cx = float(np.mean([pts[i][0] for i in idxs]))
+        cy = float(np.mean([pts[i][1] for i in idxs]))
+        records.append(MarkerRecord(group_key=shape, marker_type="stroked",
+                                    pixel_x=cx, pixel_y=cy))
+    return records
+
+
+def group_stroked_by_shape(records: list[MarkerRecord]) -> dict[str, list[MarkerRecord]]:
+    groups: dict[str, list[MarkerRecord]] = defaultdict(list)
+    for r in records:
+        groups[r.group_key].append(r)
+    return dict(groups)
+
+
 def detect_merge_warnings(records: list[MarkerRecord], per_group_counts: dict[str, int]) -> list[str]:
     """Flag groups whose count is a low outlier vs siblings — the deterministic
     analogue of the row_count_sanity QA check, raised at the source (plan §4.3)."""

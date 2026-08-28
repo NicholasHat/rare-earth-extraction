@@ -99,6 +99,104 @@ def test_detect_merge_warnings_silent_when_uniform():
     assert markers.detect_merge_warnings([], counts) == []
 
 
+# --- markers: stroked glyph assembly (×/+/✶) --------------------------------- #
+
+def _seg(x0, top, x1, bottom):
+    return {"x0": x0, "top": top, "x1": x1, "bottom": bottom}
+
+
+def _plus_at(cx, cy, arm=3.0):
+    # horizontal + vertical fragment through (cx, cy)
+    return [_seg(cx - arm, cy, cx + arm, cy), _seg(cx, cy - arm, cx, cy + arm)]
+
+
+def _cross_at(cx, cy, arm=3.0):
+    # two diagonals through (cx, cy)
+    return [_seg(cx - arm, cy - arm, cx + arm, cy + arm),
+            _seg(cx - arm, cy + arm, cx + arm, cy - arm)]
+
+
+def _star_at(cx, cy, arm=3.0):
+    return _cross_at(cx, cy, arm) + [_seg(cx - arm, cy, cx + arm, cy)]
+
+
+def test_classify_glyph_shape_distinguishes_plus_cross_star():
+    assert markers.classify_glyph_shape(_plus_at(0, 0)) == "plus"
+    assert markers.classify_glyph_shape(_cross_at(0, 0)) == "cross"
+    assert markers.classify_glyph_shape(_star_at(0, 0)) == "star"
+
+
+def test_assemble_stroked_recovers_glyphs_and_shapes():
+    segs = _plus_at(10, 10) + _cross_at(40, 10) + _plus_at(70, 10)
+    recs = markers.assemble_stroked(segs)
+    assert len(recs) == 3
+    groups = markers.group_stroked_by_shape(recs)
+    assert sorted(groups) == ["cross", "plus"]
+    assert len(groups["plus"]) == 2
+    assert len(groups["cross"]) == 1
+    assert all(r.marker_type == "stroked" for r in recs)
+
+
+def test_assemble_stroked_does_not_merge_close_distinct_glyphs():
+    # Two distinct + glyphs whose arms nearly touch — same dense-zone concern
+    # as the filled path, but here eps is arm-length-derived, not spacing-derived.
+    segs = _plus_at(0, 0, arm=3.0) + _plus_at(6.5, 0, arm=3.0)
+    recs = markers.assemble_stroked(segs)
+    assert len(recs) == 2
+
+
+def test_assemble_stroked_eps_is_density_invariant():
+    sparse = _plus_at(0, 0) + _plus_at(50, 0)
+    dense = _plus_at(0, 0) + _plus_at(2, 0)
+    assert markers._calibrate_eps_stroked(sparse) == markers._calibrate_eps_stroked(dense)
+
+
+def test_assemble_stroked_drops_unmatched_fragment_as_noise():
+    # One clean plus glyph plus a lone stray fragment (e.g. a partial gridline
+    # that slipped past length filtering) with no partner nearby.
+    segs = _plus_at(0, 0) + [_seg(200, 200, 203, 200)]
+    recs = markers.assemble_stroked(segs)
+    assert len(recs) == 1
+
+
+def test_assemble_stroked_empty_input():
+    assert markers.assemble_stroked([]) == []
+
+
+def test_classify_glyph_shape_rejects_non_glyph_fragments():
+    # Two near-parallel vertical fragments (e.g. a coincidental crossing of two
+    # unrelated axis ticks) don't form any recognized glyph.
+    parallel = [_seg(10, 0, 10, 6), _seg(11, 0.5, 11, 6.5)]
+    assert markers.classify_glyph_shape(parallel) is None
+    assert markers.classify_glyph_shape([_seg(0, 0, 5, 0)]) is None  # single fragment
+    assert markers.classify_glyph_shape([_seg(0, 0, 5, 0)] * 4) is None  # 4 fragments
+
+
+def test_assemble_stroked_drops_clusters_with_no_recognized_shape():
+    # Two parallel fragments cluster together (within eps) but classify to
+    # None — must be dropped, not mislabelled into a catch-all group.
+    segs = [_seg(10, 0, 15, 0), _seg(10.5, 0.5, 15.5, 0.5)]
+    assert markers.assemble_stroked(segs) == []
+
+
+# --- detect: stroked-segment collection excludes ticks/legend/long lines ---- #
+
+class _FakePage:
+    def __init__(self, lines):
+        self.lines = lines
+
+
+def test_collect_stroked_segments_excludes_ticks_outside_frame():
+    from extraction.curve_extractor import detect
+    frame = (0, 0, 100, 100)
+    inside = _seg(40, 40, 46, 40)          # short, inside frame -> glyph fragment
+    tick = _seg(-4, 50, 0, 50)             # short, outside frame -> axis tick
+    long_line = _seg(0, 0, 90, 90)         # long, inside frame -> connecting curve
+    page = _FakePage([inside, tick, long_line])
+    out = detect.collect_stroked_segments(page, frame)
+    assert out == [inside]
+
+
 # --- raster shape classification -------------------------------------------- #
 
 def test_classify_blob_shape_filled_vs_stroked():
@@ -202,6 +300,14 @@ def test_vector_path_recovers_uniform_marker_counts():
     from extraction.curve_extractor import extract_curves
     result = extract_curves(_SWAIN.read_bytes(), 2)
     assert result.is_vector
-    counts = sorted(result.per_group_counts.values(), reverse=True)
+    filled_counts = sorted(
+        (n for k, n in result.per_group_counts.items()
+         if any(m.group_key == k and m.marker_type == "filled" for m in result.markers)),
+        reverse=True,
+    )
     # 9 colour series, each a full 19-point curve (the LLM under-counted these).
-    assert counts == [19] * 9
+    # This figure's legend actually has 14 elements — the rest (e.g. Nd = "+")
+    # are monochrome stroked glyphs assemble_stroked now also partially recovers,
+    # but that path has no oracle count yet (plan §5.2), so it's exercised here
+    # only informally, not asserted on — same caution curve_prepass.py applies.
+    assert filled_counts == [19] * 9

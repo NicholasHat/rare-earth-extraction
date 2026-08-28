@@ -25,10 +25,11 @@ discarded those coordinates and kept only counts. `to_prompt_block()` now
 injects them as a JSON block so the model can skip its own calibration/
 clustering work for those series entirely (docs/curve_extractor_plan.md §6),
 which is the main token-cost driver on dense multi-figure papers. Monochrome
-(stroked-marker) series are NOT included here — that assembly path isn't
-implemented yet (see docs/curve_extractor_plan.md), so those pages still only
-ever produce filled-marker coordinates, same set the authoritative gate below
-already trusts.
+(stroked-marker) series are deliberately NOT included here even though
+`markers.assemble_stroked` now exists — it has no oracle-paper validation
+(plan §5.2's "second paper" case) the way the filled/colour path has, so its
+coordinates aren't trusted as ground truth yet. Only filled-marker coordinates
+are injected, same set the authoritative gate below already trusts.
 """
 from __future__ import annotations
 
@@ -178,10 +179,10 @@ def _round(x: float) -> float:
 
 def _markers_json_block(markers: list[MarkerRecord] | None) -> str:
     """Serialize calibrated filled-marker points as `{group_key: [[x, y], ...]}`,
-    keyed by legend colour. Only "filled" markers are included — the stroked/
-    monochrome assembly path isn't implemented (module docstring), so nothing
-    else should ever appear here, but this filters defensively rather than
-    assuming callers only ever pass filled markers in."""
+    keyed by legend colour. Only "filled" markers are included — stroked/
+    monochrome markers exist on `res.markers` too now, but aren't validated as
+    authoritative yet (module docstring), so this filters them out here rather
+    than assuming callers only ever pass filled markers in."""
     if not markers:
         return ""
     grouped: dict[str, list[list[float]]] = defaultdict(list)
@@ -206,14 +207,25 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
             result.warnings.append(f"page {idx}: pre-pass failed: {e}")
             continue
 
-        if res.is_vector and res.per_group_counts:
-            counts = sorted(res.per_group_counts.values(), reverse=True)
+        if res.is_vector:
+            # This gate is only validated against filled/colour markers; a
+            # monochrome stroked group (markers.assemble_stroked) has no
+            # oracle-paper count yet (plan §5.2), so it must not join the
+            # uniformity/panel-merge/authoritative logic below and silently
+            # demote or pollute an otherwise clean colour figure's confidence.
+            filled = [m for m in res.markers if m.marker_type == "filled"]
+            per_group: dict[str, int] = defaultdict(int)
+            for m in filled:
+                per_group[m.group_key] += 1
+            if not per_group:
+                continue
+            counts = sorted(per_group.values(), reverse=True)
             if len(counts) < _MIN_SERIES or sum(counts) < _MIN_MARKERS:
                 continue  # not a data figure (logo / stray graphic)
             # Two gates: uniform counts AND no colour group spatially split
             # across panels — a two-panel figure inflates every series by the
             # same factor, so uniformity alone passes it (Swain & Otu Fig. 6).
-            confident = _is_uniform(counts) and not _looks_panel_merged(res.markers)
+            confident = _is_uniform(counts) and not _looks_panel_merged(filled)
             # Coordinates are only carried for authoritative pages AND when
             # both axes actually calibrated within tolerance — extractor.py's
             # _apply_calibration() writes data_x/data_y even when an axis's
@@ -224,7 +236,7 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
                 res.x_calibration is not None and res.x_calibration.ok
                 and res.y_calibration is not None and res.y_calibration.ok
             )
-            markers = res.markers if (confident and calibrated) else None
+            markers = filled if (confident and calibrated) else None
             fp = FigurePage(idx, counts, confident=confident, markers=markers)
             (result.confident_pages if fp.confident else result.unverified_pages).append(fp)
             result.warnings.extend(f"page {idx}: {w}" for w in res.warnings)

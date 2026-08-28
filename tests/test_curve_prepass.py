@@ -99,8 +99,8 @@ def test_analyze_withholds_coordinates_when_an_axis_calibration_is_untrusted():
     # calibration residual is too high — extractor.py still writes data_x/
     # data_y in this case, so analyze() must gate on AxisCalibration.ok too.
     markers = [
-        MarkerRecord("#ff0000", "filled", pixel_x=float(i), pixel_y=float(i),
-                     data_x=float(i), data_y=float(i))
+        MarkerRecord("#ff0000" if i < 15 else "#00ff00", "filled",
+                     pixel_x=float(i), pixel_y=float(i), data_x=float(i), data_y=float(i))
         for i in range(30)
     ]
     counts = {"#ff0000": 15, "#00ff00": 15}
@@ -116,8 +116,8 @@ def test_analyze_withholds_coordinates_when_an_axis_calibration_is_untrusted():
 
 def test_analyze_carries_coordinates_when_both_axes_trusted():
     markers = [
-        MarkerRecord("#ff0000", "filled", pixel_x=float(i), pixel_y=float(i),
-                     data_x=float(i), data_y=float(i))
+        MarkerRecord("#ff0000" if i < 15 else "#00ff00", "filled",
+                     pixel_x=float(i), pixel_y=float(i), data_x=float(i), data_y=float(i))
         for i in range(30)
     ]
     counts = {"#ff0000": 15, "#00ff00": 15}
