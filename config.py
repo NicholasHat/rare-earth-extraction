@@ -23,14 +23,6 @@ DB_PATH = DATA_DIR / "master.db"       # the SQLite master database
 
 PROMPTS_DIR = ROOT / "prompts"
 
-# The auto-refreshed one-row-per-paper dedup spreadsheet (v_paper_summary),
-# rewritten after every approval. Point SUMMARY_XLSX_PATH at a cloud-synced
-# folder (e.g. Google Drive for Desktop's "My Drive") to get an auto-updating
-# copy in the cloud with no API credentials.
-SUMMARY_XLSX_PATH = Path(
-    os.getenv("SUMMARY_XLSX_PATH", str(EXPORTS_DIR / "paper_summary.xlsx"))
-)
-
 # --- Settings (with sensible local-demo defaults) --------------------------
 REQUIRE_PASSWORD = os.getenv("REQUIRE_PASSWORD", "false").strip().lower() == "true"
 WRITE_PASSWORD = os.getenv("WRITE_PASSWORD", "")

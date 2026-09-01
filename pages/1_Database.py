@@ -53,7 +53,8 @@ tab_summary, tab_papers, tab_runs, tab_log, tab_data = st.tabs(
 with tab_summary:
     st.caption(
         "One row per paper — check here before extracting to avoid duplicates. "
-        f"Auto-exported to `{config.SUMMARY_XLSX_PATH}` on every approval."
+        "Always current (rebuilt from the DB on load): download it below, or "
+        "select cells in the table and copy-paste straight into your own sheet."
     )
     if summary_df.empty:
         st.info("No papers yet — upload one on the home page.")
