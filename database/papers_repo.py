@@ -34,6 +34,34 @@ def get(conn: sqlite3.Connection, paper_id: int) -> sqlite3.Row | None:
     ).fetchone()
 
 
+TRACKING_FIELDS = (
+    "short_citation",
+    "pub_year",
+    "figures_used",
+    "known_issues",
+    "short_description",
+)
+
+
+def update_tracking(conn: sqlite3.Connection, paper_id: int, **fields: str | None) -> None:
+    """Update the reviewer-entered tracking-sheet fields on a paper.
+
+    Only non-empty values are written, so approving a re-extraction with the
+    tracking inputs left blank keeps whatever was entered the first time.
+    """
+    unknown = set(fields) - set(TRACKING_FIELDS)
+    if unknown:
+        raise ValueError(f"not tracking fields: {sorted(unknown)}")
+    updates = {k: v.strip() for k, v in fields.items() if v is not None and v.strip()}
+    if not updates:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in updates)
+    conn.execute(
+        f"UPDATE papers SET {assignments} WHERE paper_id = ?",
+        (*updates.values(), paper_id),
+    )
+
+
 def insert(
     conn: sqlite3.Connection,
     *,

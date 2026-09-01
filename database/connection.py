@@ -23,12 +23,22 @@ _PROMPT_RUN_USAGE_COLUMNS = {
     "cache_read_input_tokens": "INTEGER",
 }
 
+# Tracking-sheet columns added to papers after its CREATE TABLE first shipped
+# (same pre-existing-DB story as the prompt_runs usage columns above).
+_PAPER_TRACKING_COLUMNS = {
+    "short_citation": "TEXT",
+    "pub_year": "TEXT",
+    "figures_used": "TEXT",
+    "known_issues": "TEXT",
+    "short_description": "TEXT",
+}
+
 
 # Views defined in schema.sql. Their CREATE ... IF NOT EXISTS is a no-op on a DB
 # that already has them, so an edited view definition would never reach an
 # existing master.db. Views hold no data — dropping them first is free and makes
 # schema.sql authoritative for every future edit.
-_VIEWS = ("v_current_best",)
+_VIEWS = ("v_current_best", "v_paper_summary")
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -36,18 +46,26 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.row_factory = sqlite3.Row
 
 
-def _ensure_prompt_run_usage_columns(conn: sqlite3.Connection) -> None:
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(prompt_runs)")}
-    for name, sql_type in _PROMPT_RUN_USAGE_COLUMNS.items():
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, sql_type in columns.items():
         if name not in existing:
-            conn.execute(f"ALTER TABLE prompt_runs ADD COLUMN {name} {sql_type}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+
+def _ensure_added_columns(conn: sqlite3.Connection) -> None:
+    """Apply every post-launch ALTER TABLE (no-op on a brand-new DB, where
+    PRAGMA table_info of a not-yet-created table is empty)."""
+    _ensure_columns(conn, "prompt_runs", _PROMPT_RUN_USAGE_COLUMNS)
+    _ensure_columns(conn, "papers", _PAPER_TRACKING_COLUMNS)
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
     for view in _VIEWS:
         conn.execute(f"DROP VIEW IF EXISTS {view}")
+    # Added columns must exist before the script recreates views that read them.
+    _ensure_added_columns(conn)
     conn.executescript(_SCHEMA_SQL.read_text())
-    _ensure_prompt_run_usage_columns(conn)
     conn.commit()
 
 
@@ -71,7 +89,7 @@ def get_conn() -> sqlite3.Connection:
         _apply_schema(conn)
     else:
         # Cheap and idempotent — covers DBs created before a column was added.
-        _ensure_prompt_run_usage_columns(conn)
+        _ensure_added_columns(conn)
         conn.commit()
     return conn
 

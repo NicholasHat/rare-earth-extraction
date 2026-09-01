@@ -32,6 +32,7 @@ def commit_extraction(
     original_filename: str | None = None,
     figure_type: str | None = None,
     is_raster_figure: int | None = None,
+    tracking: dict[str, str | None] | None = None,
     note: str | None = None,
     override: bool = False,
     input_tokens: int | None = None,
@@ -69,6 +70,10 @@ def commit_extraction(
                     figure_type=figure_type,
                     is_raster_figure=is_raster_figure,
                 )
+            if tracking:
+                # Same call for new and reused papers: on a re-approval the
+                # reviewer's (non-empty) tracking edits update the paper row.
+                papers_repo.update_tracking(conn, paper_id, **tracking)
 
             run_id = review_repo.insert_prompt_run(
                 conn,

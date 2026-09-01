@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 INCOMING_DIR = DATA_DIR / "incoming"   # persisted source PDFs, named <sha256>.pdf
 STAGING_DIR = DATA_DIR / "staging"     # per-paper extracted XLSX awaiting review
-EXPORTS_DIR = DATA_DIR / "exports"     # approved per-paper XLSX exports
+EXPORTS_DIR = DATA_DIR / "exports"     # approved per-paper CSV exports (<citation>_<rows>.csv)
 DB_PATH = DATA_DIR / "master.db"       # the SQLite master database
 
 PROMPTS_DIR = ROOT / "prompts"

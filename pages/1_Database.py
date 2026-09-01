@@ -8,8 +8,6 @@ be able to mutate anything.
 """
 from __future__ import annotations
 
-import io
-
 import streamlit as st
 
 import config
@@ -27,6 +25,7 @@ try:
         "SELECT COUNT(*) FROM prompt_runs WHERE status='approved'"
     ).fetchone()[0]
     n_best = extractions_repo.count_current_best(conn)
+    tracking_df = browse.tracking_sheet(conn)
     summary_df = browse.paper_summary(conn)
     papers_df = browse.list_papers(conn)
     runs_df = browse.list_prompt_runs(conn)
@@ -47,27 +46,28 @@ st.caption(
 
 st.divider()
 tab_summary, tab_papers, tab_runs, tab_log, tab_data = st.tabs(
-    ["Paper summary", "Papers", "Extraction runs", "Review log", "Browse current-best data"]
+    ["Tracking sheet", "Papers", "Extraction runs", "Review log", "Browse current-best data"]
 )
 
 with tab_summary:
     st.caption(
-        "One row per paper — check here before extracting to avoid duplicates. "
-        "Always current (rebuilt from the DB on load): download it below, or "
-        "select cells in the table and copy-paste straight into your own sheet."
+        "One row per paper, in the exact column layout of the REE Paper Tracking "
+        "spreadsheet — check here before extracting to avoid duplicates. Always "
+        "current (rebuilt from the DB on load): download the CSV below, or select "
+        "rows in the table and copy-paste straight into the sheet."
     )
-    if summary_df.empty:
+    if tracking_df.empty:
         st.info("No papers yet — upload one on the home page.")
     else:
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        buf = io.BytesIO()
-        summary_df.to_excel(buf, index=False, engine="openpyxl")
+        st.dataframe(tracking_df, use_container_width=True, hide_index=True)
         st.download_button(
-            "Download XLSX",
-            data=buf.getvalue(),
-            file_name="paper_summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Download tracking CSV",
+            data=tracking_df.to_csv(index=False),
+            file_name="REE_paper_tracking.csv",
+            mime="text/csv",
         )
+        with st.expander("Extra detail (per-element rows, pH range, prompt version)"):
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
 with tab_papers:
     if papers_df.empty:

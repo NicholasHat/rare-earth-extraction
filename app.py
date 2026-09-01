@@ -19,7 +19,7 @@ import streamlit as st
 
 import auth
 import config
-from database import connection, merge
+from database import connection, merge, naming, papers_repo
 from extraction import runner
 from extraction.runner import BatchItem, ExtractionResult
 from extraction.parse_output import ParseError
@@ -411,6 +411,46 @@ def render_batch_jobs() -> None:
 # --------------------------------------------------------------------------- #
 # Review + merge queue (one paper at a time, picked from the pending batch)
 # --------------------------------------------------------------------------- #
+def _stored_tracking(sha: str, doi: str | None) -> dict[str, str]:
+    """Tracking-sheet fields already on this paper (re-extraction case), '' if none."""
+    conn = connection.get_conn()
+    try:
+        row = papers_repo.find_by_hash(conn, sha) or papers_repo.find_by_doi(conn, doi)
+    finally:
+        conn.close()
+    return {
+        field: (row[field] or "") if row is not None else ""
+        for field in papers_repo.TRACKING_FIELDS
+    }
+
+
+def render_tracking_inputs(sha: str, doi: str | None) -> dict[str, str]:
+    """Reviewer-entered fields for the tracking sheet; persisted on approval."""
+    stored = _stored_tracking(sha, doi)
+    with st.expander("Tracking info (short citation also names the export file)", expanded=True):
+        col1, col2, col3 = st.columns([2, 1, 2])
+        tracking = {
+            "short_citation": col1.text_input(
+                "Short citation", value=stored["short_citation"],
+                placeholder="e.g. Swain & Otu", key=f"cit_{sha}",
+            ),
+            "pub_year": col2.text_input(
+                "Year", value=stored["pub_year"], placeholder="e.g. 2011", key=f"year_{sha}",
+            ),
+            "figures_used": col3.text_input(
+                "Figures / tables used", value=stored["figures_used"],
+                placeholder="e.g. Fig. 2, Fig. 4", key=f"figs_{sha}",
+            ),
+            "known_issues": st.text_area(
+                "Known issues / caveats", value=stored["known_issues"], key=f"issues_{sha}",
+            ),
+            "short_description": st.text_area(
+                "Short description", value=stored["short_description"], key=f"desc_{sha}",
+            ),
+        }
+    return tracking
+
+
 def render_review_queue() -> None:
     pending: dict = st.session_state.get("pending", {})
     if not pending:
@@ -437,6 +477,7 @@ def render_review_queue() -> None:
         with st.expander(f"Captured text endpoints ({len(result.text_endpoints)})"):
             st.dataframe(pd.DataFrame(result.text_endpoints), use_container_width=True)
 
+    tracking = render_tracking_inputs(sha, stash["doi"])
     note = st.text_input("Review note (optional)", key=f"note_{sha}")
     override = False
     if not result.qa_report.passed:
@@ -477,6 +518,7 @@ def render_review_queue() -> None:
                 original_filename=stash["filename"],
                 figure_type=None,
                 is_raster_figure=stash["meta"].get("is_raster_figure"),
+                tracking=tracking,
                 note=merge_note,
                 override=override,
                 input_tokens=result.input_tokens,
@@ -486,9 +528,12 @@ def render_review_queue() -> None:
             )
         finally:
             conn.close()
-        # Export the approved per-paper spreadsheet artifact.
-        export_path = config.EXPORTS_DIR / f"paper_{summary['paper_id']}.xlsx"
-        edited_clean.to_excel(export_path, index=False, engine="openpyxl")
+        # Export the approved per-paper artifact, named to match the tracking
+        # sheet's `Output file` column (e.g. Swain_&_Otu_322.csv).
+        export_path = config.EXPORTS_DIR / naming.export_filename(
+            tracking["short_citation"], summary["paper_id"], summary["rows_merged"]
+        )
+        edited_clean.to_csv(export_path, index=False)
         merged_msg = (
             f"Merged {summary['rows_merged']} rows → paper_id={summary['paper_id']}, "
             f"prompt_run_id={summary['prompt_run_id']}. Export: {export_path.name}"

@@ -15,7 +15,17 @@ CREATE TABLE IF NOT EXISTS papers (
     pdf_path          TEXT NOT NULL,        -- data/incoming/<sha256>.pdf; PDFs are persisted
     figure_type       TEXT,                 -- 'pct_E_vs_pH' | 'logD_vs_conc' | 'other'
     is_raster_figure  INTEGER,              -- 1/0/NULL; set by pdf_inspect
-    uploaded_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    uploaded_at       TEXT NOT NULL DEFAULT (datetime('now')),
+
+    -- Tracking-sheet fields (reviewer-entered at approval; mirror the external
+    -- "REE Paper Tracking" spreadsheet — not derivable from the extracted data.
+    -- Added post-launch: database.connection adds these to pre-existing DBs at
+    -- startup; see _ensure_added_columns).
+    short_citation    TEXT,                 -- e.g. 'Swain & Otu'; also names the export file
+    pub_year          TEXT,                 -- publication year, e.g. '2011'
+    figures_used      TEXT,                 -- e.g. 'Fig. 2, Fig. 4'
+    known_issues      TEXT,                 -- caveats spotted during review
+    short_description TEXT                  -- one-paragraph summary of the paper/extraction
     -- NOTE: no paper-level 'status'; review state lives per-version on prompt_runs.status.
 );
 
@@ -37,7 +47,7 @@ CREATE TABLE IF NOT EXISTS prompt_runs (
     raw_response     TEXT,                  -- full model output, for audit/replay
 
     -- Usage/cost telemetry (added post-launch — database.connection adds these
-    -- columns to pre-existing DBs at startup; see _ensure_prompt_run_usage_columns).
+    -- columns to pre-existing DBs at startup; see _ensure_added_columns).
     input_tokens                    INTEGER,
     output_tokens                   INTEGER,
     cache_creation_input_tokens     INTEGER,
@@ -164,6 +174,7 @@ element_rollup AS (
            GROUP_CONCAT(element, ', ' ORDER BY element) AS elements,
            GROUP_CONCAT(element || ' (' || n_rows || ')', ', ' ORDER BY element)
                AS rows_per_element,
+           COUNT(*) AS n_elements,
            SUM(n_rows) AS data_rows
     FROM per_element
     GROUP BY paper_id
@@ -192,8 +203,17 @@ SELECT p.paper_id,
        p.doi,
        p.title,
        p.reference_no,
+       p.short_citation,
+       p.pub_year,
+       p.figures_used,
+       p.known_issues,
+       p.short_description,
+       CASE WHEN pu.paper_id IS NOT NULL THEN 'Extracted' ELSE 'Uploaded' END
+           AS status,
+       DATE(pr.reviewed_at) AS date_processed,
        er.elements,
        er.rows_per_element,
+       er.n_elements,
        er.data_rows,
        xr.extractants,
        tr.extractant_types,
