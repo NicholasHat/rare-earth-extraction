@@ -25,7 +25,7 @@ Call `query_database` with a single read-only `SELECT`. Always query **`v_curren
 
 — plus `paper_id` and `prompt_run_id` (useful for counting distinct papers/runs). The `Rare Earth Elements (REY:La, Ce, Nd)` column holds a bare element symbol per row (e.g. `"La"`, `"Lu"`); match it with `LIKE '%La%'`-style patterns if unsure of exact casing.
 
-Other allowed tables: `papers` (DOI, title, pdf path), `text_endpoints` (the paper's own stated numeric claims, for context — not for digitized-curve questions), `prompt_runs` (run metadata). The raw `extractions` table and any other table are off-limits; a guard independent of this prompt enforces that, so don't bother trying to route around it.
+Other allowed tables: `papers` (DOI, title, pdf path), `v_paper_summary` (one row per paper: elements studied, per-element row counts, extractants, pH range — the quick "do we already have this paper / what does it cover" view), `text_endpoints` (the paper's own stated numeric claims, for context — not for digitized-curve questions), `prompt_runs` (run metadata). The raw `extractions` table and any other table are off-limits; a guard independent of this prompt enforces that, so don't bother trying to route around it.
 
 Use `list_extractants` to resolve a fuzzy or partial extractant name (e.g. "cyanex") to what's actually in the data before filtering on it.
 

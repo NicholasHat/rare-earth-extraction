@@ -25,7 +25,7 @@ from contextlib import contextmanager
 # The only relations the assistant is allowed to read. v_current_best (not the
 # raw `extractions` table) is the one the agent is told to use for "what data
 # do we have" questions, so superseded prompt-version rows never appear.
-ALLOWED_TABLES = {"v_current_best", "papers", "text_endpoints", "prompt_runs"}
+ALLOWED_TABLES = {"v_current_best", "v_paper_summary", "papers", "text_endpoints", "prompt_runs"}
 
 DEFAULT_LIMIT = 500
 

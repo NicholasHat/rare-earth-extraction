@@ -45,6 +45,64 @@ def test_list_papers_includes_counts(conn):
     assert df.iloc[0]["title"] == "A Test Paper"
 
 
+def test_paper_summary_empty(conn):
+    assert browse.paper_summary(conn).empty
+
+
+def test_paper_summary_aggregates_elements_extractants_and_ph(conn):
+    rows = [
+        {schema.ELEMENT_COLUMN: "La", "pH": 1.5, "Extractant": "D2EHPA", "Extractant type": "acidic"},
+        {schema.ELEMENT_COLUMN: "La", "pH": 3.0, "Extractant": "D2EHPA", "Extractant type": "acidic"},
+        {schema.ELEMENT_COLUMN: "Ce", "pH": 2.0, "Extractant": "Cyanex 572", "Extractant type": "acidic"},
+    ]
+    merge.commit_extraction(
+        conn,
+        content_sha256="hash1",
+        pdf_path="data/incoming/hash1.pdf",
+        df=schema.coerce_schema(pd.DataFrame(rows)),
+        text_endpoints=[],
+        prompt_version="extraction_v9",
+        prompt_sha256="psha",
+        model="claude-sonnet-5",
+        qa_passed=True,
+        qa_report_json="[]",
+        raw_response="{}",
+        doi="10.1/x",
+        title="A Test Paper",
+    )
+    df = browse.paper_summary(conn)
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["elements"] == "Ce, La"
+    assert row["rows_per_element"] == "Ce (1), La (2)"
+    assert row["data_rows"] == 3
+    assert row["extractants"] == "Cyanex 572, D2EHPA"
+    assert row["extractant_types"] == "acidic"
+    assert row["ph_min"] == 1.5
+    assert row["ph_max"] == 3.0
+    assert row["prompt_version"] == "extraction_v9"
+
+
+def test_paper_summary_reflects_the_current_best_run_only(conn):
+    _commit(conn, prompt_version="extraction_v8")
+    _commit(conn, prompt_version="extraction_v9")  # supersedes v8 for this paper
+    df = browse.paper_summary(conn)
+    assert len(df) == 1
+    assert df.iloc[0]["prompt_version"] == "extraction_v9"
+    assert df.iloc[0]["data_rows"] == 3  # v8's rows are not double-counted
+
+
+def test_paper_summary_includes_unapproved_papers(conn):
+    from database import papers_repo
+
+    papers_repo.insert(conn, content_sha256="orphan", pdf_path="data/incoming/orphan.pdf",
+                       doi="10.1/orphan", title="Uploaded, not approved")
+    df = browse.paper_summary(conn)
+    assert len(df) == 1
+    assert df.iloc[0]["title"] == "Uploaded, not approved"
+    assert pd.isna(df.iloc[0]["data_rows"])
+
+
 def test_list_prompt_runs_returns_history_newest_first(conn):
     _commit(conn, sha="a", doi="10.1/a", prompt_version="extraction_v5")
     _commit(conn, sha="a", doi="10.1/a", prompt_version="extraction_v5.1")

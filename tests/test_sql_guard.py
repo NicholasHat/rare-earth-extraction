@@ -41,7 +41,9 @@ def test_disallowed_table_rejected(table):
         guard(f"SELECT * FROM {table}")
 
 
-@pytest.mark.parametrize("table", ["v_current_best", "papers", "text_endpoints", "prompt_runs"])
+@pytest.mark.parametrize(
+    "table", ["v_current_best", "v_paper_summary", "papers", "text_endpoints", "prompt_runs"]
+)
 def test_allowed_tables_pass(table):
     guard(f"SELECT * FROM {table}")  # should not raise
 
@@ -142,6 +144,12 @@ def test_authorizer_allows_reading_through_an_allow_listed_view(conn):
     """v_current_best is a view over `extractions`; expanding it reads the raw
     table, which must stay allowed even though a direct read is not."""
     assert _run(conn, "SELECT * FROM v_current_best") == []
+
+
+def test_authorizer_allows_the_doubly_nested_summary_view(conn):
+    """v_paper_summary expands v_current_best, which expands `extractions` —
+    every level of that chain must clear the authorizer."""
+    assert _run(conn, "SELECT * FROM v_paper_summary") == []
 
 
 def test_authorizer_allows_a_plain_cte(conn):

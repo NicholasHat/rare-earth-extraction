@@ -27,6 +27,16 @@ def list_papers(conn: sqlite3.Connection) -> pd.DataFrame:
     )
 
 
+def paper_summary(conn: sqlite3.Connection) -> pd.DataFrame:
+    """One row per paper from v_paper_summary — the dedup sheet.
+
+    Elements, per-element row counts, extractants, and pH range of each paper's
+    current-best data; uploaded-but-unapproved papers appear with null data
+    columns so they too can be checked before re-extracting.
+    """
+    return pd.read_sql_query("SELECT * FROM v_paper_summary", conn)
+
+
 def list_prompt_runs(conn: sqlite3.Connection, paper_id: int | None = None) -> pd.DataFrame:
     """Extraction run history — every attempt (pending/approved/rejected), not just approved."""
     sql = """

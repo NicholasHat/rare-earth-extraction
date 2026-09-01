@@ -8,6 +8,8 @@ be able to mutate anything.
 """
 from __future__ import annotations
 
+import io
+
 import streamlit as st
 
 import config
@@ -25,6 +27,7 @@ try:
         "SELECT COUNT(*) FROM prompt_runs WHERE status='approved'"
     ).fetchone()[0]
     n_best = extractions_repo.count_current_best(conn)
+    summary_df = browse.paper_summary(conn)
     papers_df = browse.list_papers(conn)
     runs_df = browse.list_prompt_runs(conn)
     log_df = browse.list_review_log(conn)
@@ -43,9 +46,27 @@ st.caption(
 )
 
 st.divider()
-tab_papers, tab_runs, tab_log, tab_data = st.tabs(
-    ["Papers", "Extraction runs", "Review log", "Browse current-best data"]
+tab_summary, tab_papers, tab_runs, tab_log, tab_data = st.tabs(
+    ["Paper summary", "Papers", "Extraction runs", "Review log", "Browse current-best data"]
 )
+
+with tab_summary:
+    st.caption(
+        "One row per paper — check here before extracting to avoid duplicates. "
+        f"Auto-exported to `{config.SUMMARY_XLSX_PATH}` on every approval."
+    )
+    if summary_df.empty:
+        st.info("No papers yet — upload one on the home page.")
+    else:
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        buf = io.BytesIO()
+        summary_df.to_excel(buf, index=False, engine="openpyxl")
+        st.download_button(
+            "Download XLSX",
+            data=buf.getvalue(),
+            file_name="paper_summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 with tab_papers:
     if papers_df.empty:

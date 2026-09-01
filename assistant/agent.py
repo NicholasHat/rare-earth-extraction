@@ -35,7 +35,8 @@ def query_database(sql: str) -> str:
         sql: A single SELECT statement (optionally a WITH/CTE ending in one).
             Query v_current_best for "what data do we have" questions, never
             a raw table, so superseded prompt-version rows never appear.
-            Allowed tables: v_current_best, papers, text_endpoints, prompt_runs.
+            Allowed tables: v_current_best, v_paper_summary, papers,
+            text_endpoints, prompt_runs.
     """
     conn = connection.get_readonly_conn()
     try:

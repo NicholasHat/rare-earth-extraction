@@ -19,7 +19,7 @@ import streamlit as st
 
 import auth
 import config
-from database import connection, merge
+from database import connection, merge, summary_export
 from extraction import runner
 from extraction.runner import BatchItem, ExtractionResult
 from extraction.parse_output import ParseError
@@ -489,6 +489,13 @@ def render_review_queue() -> None:
         # Export the approved per-paper spreadsheet artifact.
         export_path = config.EXPORTS_DIR / f"paper_{summary['paper_id']}.xlsx"
         edited_clean.to_excel(export_path, index=False, engine="openpyxl")
+        # Refresh the one-row-per-paper dedup sheet. The merge is already
+        # committed, so an unwritable path (e.g. a cloud-sync folder that's
+        # offline) must warn, not fail the approval.
+        try:
+            summary_export.refresh_summary_xlsx()
+        except OSError as e:
+            st.warning(f"Paper-summary sheet not refreshed ({config.SUMMARY_XLSX_PATH}): {e}")
         merged_msg = (
             f"Merged {summary['rows_merged']} rows → paper_id={summary['paper_id']}, "
             f"prompt_run_id={summary['prompt_run_id']}. Export: {export_path.name}"
