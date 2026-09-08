@@ -1,17 +1,18 @@
-"""REE Extraction Dashboard — Phase A2.
+"""REE Extraction Dashboard — home page (Pillar A).
 
 Batch PDF upload: one or more PDFs in -> one 26-column table per paper out,
 each with automatic QA and manual review before merging into the master DB.
 Run with:  streamlit run app.py
 
-This is the Pillar A spine (README §6). Pillars B (calculator) and C (assistant)
-come later; the schema and master DB they read from are built here.
+This page is the only writer of the master DB (plan §6); the Database,
+Calculator and Lab Assistant pages under pages/ are read-only consumers.
+Everything that must survive a server restart — the review queue and any
+in-flight Batch API job — is persisted through extraction/staging.py; this
+module is UI only.
 """
 from __future__ import annotations
 
-import json
-from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -20,13 +21,14 @@ import streamlit as st
 import auth
 import config
 from database import connection, merge, naming, papers_repo
-from extraction import runner
-from extraction.runner import BatchItem, ExtractionResult
+from extraction import runner, staging
 from extraction.parse_output import ParseError
 from extraction.prompt_loader import PromptNotReadyError
+from extraction.runner import ExtractionResult
+from extraction.staging import BatchJob, PaperRef, StagedPaper
 from ingestion import dedup, doi as doi_mod, pdf_inspect, upload
 from validation import schema
-from validation.report import QAReport, Severity
+from validation.report import Severity
 
 st.set_page_config(page_title="REE Extraction Dashboard", layout="wide")
 
@@ -34,133 +36,18 @@ st.set_page_config(page_title="REE Extraction Dashboard", layout="wide")
 connection.init_db()
 
 
-# --------------------------------------------------------------------------- #
-# Staging persistence (survive server restarts / idle timeouts)
-# --------------------------------------------------------------------------- #
-
-def _meta_path(sha: str):
-    return config.STAGING_DIR / f"{sha}.meta.json"
-
-
-def _staging_path(sha: str):
-    return config.STAGING_DIR / f"{sha}.xlsx"
+def _pending() -> dict[str, StagedPaper]:
+    """The review queue, restored from disk on the first run of a session."""
+    if "pending" not in st.session_state:
+        st.session_state["pending"] = staging.load_all()
+    return st.session_state["pending"]
 
 
-def _save_staging_meta(sha: str, stash: dict, result: ExtractionResult) -> None:
-    """Write a JSON sidecar so the review queue can be restored after a restart."""
-    payload = {
-        "sha": sha,
-        "pdf_path": stash["pdf_path"],
-        "doi": stash["doi"],
-        "filename": stash["filename"],
-        "meta": stash["meta"],
-        "figure_is_curve": stash.get("figure_is_curve", True),
-        "prompt_version": result.prompt_version,
-        "prompt_sha256": result.prompt_sha256,
-        "model": result.model,
-        "raw_response": result.raw_response,
-        "coercion_failures": result.coercion_failures,
-        "curve_analysis": result.curve_analysis,
-        "deterministic_counts": result.deterministic_counts,
-        "qa_report_json": result.qa_report.to_json(),
-        "text_endpoints": result.text_endpoints,
-        "input_tokens": result.input_tokens,
-        "output_tokens": result.output_tokens,
-        "cache_creation_input_tokens": result.cache_creation_input_tokens,
-        "cache_read_input_tokens": result.cache_read_input_tokens,
-    }
-    _meta_path(sha).write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _delete_staging_files(sha: str) -> None:
-    for p in (_meta_path(sha), _staging_path(sha)):
-        try:
-            p.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def _restore_staging_queue() -> None:
-    """On first load, reload any unreviewed staging items from disk into session state."""
-    if st.session_state.get("_staging_restored"):
-        return
-    st.session_state["_staging_restored"] = True
-    pending = st.session_state.setdefault("pending", {})
-    for meta_file in config.STAGING_DIR.glob("*.meta.json"):
-        sha = meta_file.name.removesuffix(".meta.json")
-        if sha in pending:
-            continue
-        xlsx = _staging_path(sha)
-        if not xlsx.exists():
-            meta_file.unlink(missing_ok=True)
-            continue
-        try:
-            payload = json.loads(meta_file.read_text(encoding="utf-8"))
-            df = pd.read_excel(xlsx, engine="openpyxl")
-            result = ExtractionResult(
-                df=df,
-                text_endpoints=payload["text_endpoints"],
-                qa_report=QAReport.from_json(payload["qa_report_json"]),
-                prompt_version=payload["prompt_version"],
-                prompt_sha256=payload["prompt_sha256"],
-                model=payload["model"],
-                raw_response=payload.get("raw_response"),
-                coercion_failures=payload.get("coercion_failures", 0),
-                curve_analysis=payload.get("curve_analysis", ""),
-                deterministic_counts=payload.get("deterministic_counts"),
-                input_tokens=payload.get("input_tokens", 0),
-                output_tokens=payload.get("output_tokens", 0),
-                cache_creation_input_tokens=payload.get("cache_creation_input_tokens", 0),
-                cache_read_input_tokens=payload.get("cache_read_input_tokens", 0),
-            )
-            pending[sha] = {
-                "sha": sha,
-                "pdf_path": payload["pdf_path"],
-                "doi": payload["doi"],
-                "filename": payload["filename"],
-                "meta": payload["meta"],
-                "figure_is_curve": payload.get("figure_is_curve", True),
-                "result": result,
-            }
-        except Exception:
-            pass  # corrupt sidecar — skip silently
-
-
-# --------------------------------------------------------------------------- #
-# Batch API job persistence (a submitted-but-not-yet-collected batch survives
-# a server restart the same way the per-paper staging queue does)
-# --------------------------------------------------------------------------- #
-
-def _batch_sidecar_path(batch_id: str):
-    return config.STAGING_DIR / f"_batch_{batch_id}.batch.json"
-
-
-def _save_batch_sidecar(
-    batch_id: str, items: dict[str, BatchItem], file_ids: dict[str, str], papers: dict[str, dict]
-) -> None:
-    payload = {
-        "batch_id": batch_id,
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "file_ids": file_ids,
-        "items": {sha: asdict(item) for sha, item in items.items()},
-        "papers": papers,  # sha -> {pdf_path, doi, meta, filename}
-    }
-    _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _load_batch_sidecars() -> dict[str, dict]:
-    out = {}
-    for f in config.STAGING_DIR.glob("_batch_*.batch.json"):
-        try:
-            payload = json.loads(f.read_text(encoding="utf-8"))
-            out[payload["batch_id"]] = payload
-        except Exception:
-            pass  # corrupt sidecar — skip silently
-    return out
-
-
-def _delete_batch_sidecar(batch_id: str) -> None:
-    _batch_sidecar_path(batch_id).unlink(missing_ok=True)
+def _first_value(df: pd.DataFrame, col: str):
+    if col not in df.columns or df.empty:
+        return None
+    s = df[col].dropna()
+    return None if s.empty else str(s.iloc[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -191,53 +78,48 @@ def render_qa(report) -> None:
 # --------------------------------------------------------------------------- #
 # Batch ingestion preview (cheap, no API calls)
 # --------------------------------------------------------------------------- #
-def _preview(uploaded_file, conn) -> dict:
+@dataclass
+class _Preview:
+    paper: PaperRef
+    pdf_bytes: bytes
+    status: str          # 'new' | 'existing (paper_id=N)'
+
+
+def _preview(uploaded_file, conn) -> _Preview:
     pdf_bytes = uploaded_file.getvalue()
-    sha = upload.content_hash(pdf_bytes)
-    _, pdf_path = upload.save_pdf(pdf_bytes)
+    sha, pdf_path = upload.save_pdf(pdf_bytes)
     parsed_doi = doi_mod.parse_doi(pdf_bytes)
-    meta = pdf_inspect.inspect(pdf_bytes)
     existing = dedup.find_existing(conn, sha, parsed_doi)
-    return {
-        "filename": uploaded_file.name,
-        "sha": sha,
-        "pdf_path": str(pdf_path),
-        "pdf_bytes": pdf_bytes,
-        "doi": parsed_doi,
-        "meta": meta,
-        "status": f"existing (paper_id={existing.paper_id})" if existing else "new",
-    }
+    return _Preview(
+        paper=PaperRef(
+            sha=sha,
+            pdf_path=str(pdf_path),
+            doi=parsed_doi,
+            filename=uploaded_file.name,
+            meta=pdf_inspect.inspect(pdf_bytes),
+        ),
+        pdf_bytes=pdf_bytes,
+        status=f"existing (paper_id={existing.paper_id})" if existing else "new",
+    )
 
 
-def _run_batch(selected: list[dict], figure_is_curve: bool) -> None:
-    pending = st.session_state.setdefault("pending", {})
+def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
+    pending = _pending()
     errors = []
     for i, p in enumerate(selected, start=1):
-        with st.status(f"[{i}/{len(selected)}] Extracting {p['filename']}…", expanded=False):
+        with st.status(f"[{i}/{len(selected)}] Extracting {p.paper.filename}…", expanded=False):
             try:
-                result = runner.extract_paper(p["pdf_bytes"], figure_is_curve=figure_is_curve)
+                result = runner.extract_paper(p.pdf_bytes, figure_is_curve=figure_is_curve)
             except PromptNotReadyError as e:
-                errors.append((p["filename"], f"Prompt not ready: {e}"))
+                errors.append((p.paper.filename, f"Prompt not ready: {e}"))
                 continue
             except ParseError as e:
-                errors.append((p["filename"], f"Could not parse model output: {e}"))
+                errors.append((p.paper.filename, f"Could not parse model output: {e}"))
                 continue
             except Exception as e:  # API/auth/etc. — record and keep going
-                errors.append((p["filename"], f"Extraction failed: {e}"))
+                errors.append((p.paper.filename, f"Extraction failed: {e}"))
                 continue
-        sha = p["sha"]
-        result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
-        stash = {
-            "sha": sha,
-            "pdf_path": p["pdf_path"],
-            "doi": p["doi"],
-            "meta": p["meta"],
-            "filename": p["filename"],
-            "figure_is_curve": figure_is_curve,
-            "result": result,
-        }
-        _save_staging_meta(sha, stash, result)
-        pending[sha] = stash
+        pending[p.paper.sha] = staging.stage(p.paper, figure_is_curve, result)
     n_ok = len(selected) - len(errors)
     if n_ok:
         st.success(f"Extracted {n_ok}/{len(selected)} paper(s) — ready for review below.")
@@ -245,11 +127,11 @@ def _run_batch(selected: list[dict], figure_is_curve: bool) -> None:
         st.error(f"{filename}: {msg}")
 
 
-def _submit_batch_job(selected: list[dict], figure_is_curve: bool) -> None:
+def _submit_batch_job(selected: list[_Preview], figure_is_curve: bool) -> None:
     """Submit selected papers as one Message Batches API job (50% cheaper,
     asynchronous). Persists a sidecar so the job can be checked/collected
     later, including across a server restart."""
-    papers = [(p["sha"], p["pdf_bytes"]) for p in selected]
+    papers = [(p.paper.sha, p.pdf_bytes) for p in selected]
     try:
         batch_id, items, file_ids = runner.submit_batch(papers, figure_is_curve=figure_is_curve)
     except PromptNotReadyError as e:
@@ -258,16 +140,12 @@ def _submit_batch_job(selected: list[dict], figure_is_curve: bool) -> None:
     except Exception as e:
         st.error(f"Batch submission failed: {e}")
         return
-    papers_meta = {
-        p["sha"]: {
-            "pdf_path": p["pdf_path"],
-            "doi": p["doi"],
-            "meta": p["meta"],
-            "filename": p["filename"],
-        }
-        for p in selected
-    }
-    _save_batch_sidecar(batch_id, items, file_ids, papers_meta)
+    BatchJob(
+        batch_id=batch_id,
+        file_ids=file_ids,
+        items=items,
+        papers={p.paper.sha: p.paper for p in selected},
+    ).save()
     st.success(
         f"Batch submitted: {len(selected)} paper(s), batch_id={batch_id}. Batches usually "
         "finish within an hour (up to 24h) — come back to 'Batch API jobs' below and click "
@@ -275,104 +153,63 @@ def _submit_batch_job(selected: list[dict], figure_is_curve: bool) -> None:
     )
 
 
-# A paused batch item is finished off with a synchronous pause_turn
-# continuation (anthropic_client._continue_until_done), which can take a
-# while and has no visual feedback of its own — long enough that a user
-# clicking "Check status" again before it finishes previously restarted the
-# whole (expensive) continuation from scratch, redoing the same work several
-# times over. This lock (persisted in the sidecar) blocks a second collection
-# attempt while one is in flight; the staleness window lets it self-heal if a
-# prior attempt crashed without clearing it.
-_COLLECTION_LOCK_STALE_AFTER = timedelta(minutes=10)
-
-
-def _collection_in_progress(payload: dict) -> bool:
-    started = payload.get("collection_started_at")
-    if not started:
-        return False
-    started_dt = datetime.fromisoformat(started)
-    return datetime.now(timezone.utc) - started_dt < _COLLECTION_LOCK_STALE_AFTER
-
-
-def _collect_batch_job(batch_id: str, payload: dict) -> None:
+def _collect_batch_job(job: BatchJob) -> None:
     """Once a batch has ended, parse + QA its results and fold successes into
     the normal staging/review queue — same shape _run_batch produces.
 
-    A paper whose result fails to parse/QA is recorded in the sidecar's
-    `errors` and kept in `items` so it stays visible across reruns and server
+    A paper whose result fails to parse/QA is recorded on the job (which keeps
+    only the failed papers) so it stays visible across reruns and server
     restarts, instead of a one-shot st.error that flashes and is gone the
     moment the immediate st.rerun() below fires. The sidecar and its Files
     API uploads are only cleaned up once every item has landed in the review
     queue — a batch with failures is never silently discarded.
 
-    Caller must hold the collection lock (`collection_started_at` already set
-    and persisted) before calling this — see render_batch_jobs.
+    Caller must hold the collection lock (job.begin_collection()) — see
+    render_batch_jobs.
     """
-    pending = st.session_state.setdefault("pending", {})
-    items = {sha: BatchItem(**item) for sha, item in payload["items"].items()}
+    pending = _pending()
     try:
-        results = runner.collect_batch(batch_id, items, payload["file_ids"])
+        results = runner.collect_batch(job.batch_id, job.items, job.file_ids)
     except Exception as e:
-        payload.pop("collection_started_at", None)
-        _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
+        job.release_lock()
         st.error(f"Could not collect batch results: {e}")
         return
 
     n_ok = 0
     errors: dict[str, str] = {}
     for sha, result in results.items():
-        filename = payload["papers"][sha]["filename"]
         if isinstance(result, Exception):
             errors[sha] = str(result)
             continue
-        paper_meta = payload["papers"][sha]
-        result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
-        stash = {
-            "sha": sha,
-            "pdf_path": paper_meta["pdf_path"],
-            "doi": paper_meta["doi"],
-            "meta": paper_meta["meta"],
-            "filename": filename,
-            "figure_is_curve": items[sha].figure_is_curve,
-            "result": result,
-        }
-        _save_staging_meta(sha, stash, result)
-        pending[sha] = stash
+        pending[sha] = staging.stage(job.papers[sha], job.items[sha].figure_is_curve, result)
         n_ok += 1
 
     if errors:
-        payload["items"] = {sha: v for sha, v in payload["items"].items() if sha in errors}
-        payload["papers"] = {sha: v for sha, v in payload["papers"].items() if sha in errors}
-        payload["errors"] = errors
-        payload.pop("collection_started_at", None)
-        _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
+        job.record_failures(errors)
     else:
-        runner.cleanup_batch_files(payload["file_ids"])
-        _delete_batch_sidecar(batch_id)
+        runner.cleanup_batch_files(job.file_ids)
+        job.delete()
 
     if n_ok:
         st.success(
-            f"Batch {batch_id}: {n_ok}/{len(results)} paper(s) extracted — ready for review below."
+            f"Batch {job.batch_id}: {n_ok}/{len(results)} paper(s) extracted — ready for review below."
         )
 
 
 def render_batch_jobs() -> None:
-    sidecars = _load_batch_sidecars()
-    if not sidecars:
+    jobs = staging.load_batch_jobs()
+    if not jobs:
         return
     st.divider()
-    st.subheader(f"Batch API jobs ({len(sidecars)} in flight)")
-    for batch_id, payload in sidecars.items():
+    st.subheader(f"Batch API jobs ({len(jobs)} in flight)")
+    for batch_id, job in jobs.items():
         with st.container(border=True):
-            st.write(
-                f"**{batch_id}** — {len(payload['items'])} paper(s), "
-                f"submitted {payload['submitted_at']}"
-            )
-            errors = payload.get("errors", {})
-            for sha, msg in errors.items():
-                filename = payload["papers"].get(sha, {}).get("filename", sha)
+            st.write(f"**{batch_id}** — {len(job.items)} paper(s), submitted {job.submitted_at}")
+            for sha, msg in job.errors.items():
+                filename = job.papers[sha].filename if sha in job.papers else sha
                 st.error(f"{filename}: {msg}")
-            if _collection_in_progress(payload):
+            in_progress = job.collection_in_progress()
+            if in_progress:
                 st.info(
                     "A previous check is still finishing up — this can take a while "
                     "if a paper needs a synchronous pause_turn continuation. Please "
@@ -381,10 +218,7 @@ def render_batch_jobs() -> None:
                 )
             col1, col2 = st.columns(2)
             with col1:
-                if st.button(
-                    "Check status", key=f"batch_status_{batch_id}",
-                    disabled=_collection_in_progress(payload),
-                ):
+                if st.button("Check status", key=f"batch_status_{batch_id}", disabled=in_progress):
                     try:
                         status = runner.batch_status(batch_id)
                     except Exception as e:
@@ -393,18 +227,17 @@ def render_batch_jobs() -> None:
                     if status != "ended":
                         st.info(f"Still processing (status: {status}). Check back later.")
                         continue
-                    payload["collection_started_at"] = datetime.now(timezone.utc).isoformat()
-                    _batch_sidecar_path(batch_id).write_text(json.dumps(payload), encoding="utf-8")
+                    job.begin_collection()
                     with st.spinner(
                         "Collecting batch results — this can take a while if any "
                         "paper needs an extra synchronous digitization round..."
                     ):
-                        _collect_batch_job(batch_id, payload)
+                        _collect_batch_job(job)
                     st.rerun()
             with col2:
-                if errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):
-                    runner.cleanup_batch_files(payload["file_ids"])
-                    _delete_batch_sidecar(batch_id)
+                if job.errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):
+                    runner.cleanup_batch_files(job.file_ids)
+                    job.delete()
                     st.rerun()
 
 
@@ -451,33 +284,91 @@ def render_tracking_inputs(sha: str, doi: str | None) -> dict[str, str]:
     return tracking
 
 
+def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
+             tracking: dict[str, str], note: str, override: bool) -> None:
+    paper, result = staged.paper, staged.result
+    edited_clean = schema.coerce_schema(edited)
+    was_edited = not edited_clean.reset_index(drop=True).equals(result.df.reset_index(drop=True))
+    merge_note = note or ("edited in review" if was_edited else None)
+    conn = connection.get_conn()
+    try:
+        summary = merge.commit_extraction(
+            conn,
+            content_sha256=paper.sha,
+            pdf_path=paper.pdf_path,
+            df=edited_clean,
+            text_endpoints=result.text_endpoints,
+            prompt_version=result.prompt_version,
+            prompt_sha256=result.prompt_sha256,
+            model=result.model,
+            qa_passed=result.qa_report.passed,
+            qa_report_json=result.qa_report.to_json(),
+            raw_response=result.raw_response,
+            doi=paper.doi,
+            reference_no=_first_value(edited_clean, "Reference No."),
+            title=paper.meta.get("title"),
+            original_filename=paper.filename,
+            figure_type=None,
+            is_raster_figure=paper.meta.get("is_raster_figure"),
+            tracking=tracking,
+            note=merge_note,
+            override=override,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_creation_input_tokens=result.cache_creation_input_tokens,
+            cache_read_input_tokens=result.cache_read_input_tokens,
+        )
+    finally:
+        conn.close()
+    # Export the approved per-paper artifact, named to match the tracking
+    # sheet's `Output file` column (e.g. Swain_&_Otu_322.csv).
+    export_path = config.EXPORTS_DIR / naming.export_filename(
+        tracking["short_citation"], summary["paper_id"], summary["rows_merged"]
+    )
+    edited_clean.to_csv(export_path, index=False)
+    merged_msg = (
+        f"Merged {summary['rows_merged']} rows → paper_id={summary['paper_id']}, "
+        f"prompt_run_id={summary['prompt_run_id']}. Export: {export_path.name}"
+    )
+    if summary["superseded_run_id"] is not None:
+        # Retiring a previously approved run changes what the calculator and
+        # assistant see, so don't let it happen silently.
+        merged_msg += (
+            f" Superseded the earlier approved run "
+            f"(prompt_run_id={summary['superseded_run_id']}) for this prompt version; "
+            "its rows stay in the DB but are no longer current."
+        )
+    st.success(merged_msg)
+    _pending().pop(sha, None)
+    staging.discard(sha)
+
+
 def render_review_queue() -> None:
-    pending: dict = st.session_state.get("pending", {})
+    pending = _pending()
     if not pending:
         return
 
     st.divider()
     st.subheader(f"Review queue ({len(pending)} pending)")
-    options = list(pending.keys())
     sha = st.selectbox(
         "Paper to review",
-        options,
-        format_func=lambda s: f"{pending[s]['filename']} ({len(pending[s]['result'].df)} rows)",
+        list(pending),
+        format_func=lambda s: f"{pending[s].paper.filename} ({len(pending[s].result.df)} rows)",
     )
-    stash = pending[sha]
-    result = stash["result"]
+    staged = pending[sha]
+    paper, result = staged.paper, staged.result
 
     render_qa(result.qa_report)
     st.caption(_format_usage(result))
 
     st.write(f"**{len(result.df)} rows extracted.** Edit cells below if needed.")
-    edited = st.data_editor(result.df, num_rows="dynamic", use_container_width=True, key=f"editor_{sha}")
+    edited = st.data_editor(result.df, num_rows="dynamic", width="stretch", key=f"editor_{sha}")
 
     if result.text_endpoints:
         with st.expander(f"Captured text endpoints ({len(result.text_endpoints)})"):
-            st.dataframe(pd.DataFrame(result.text_endpoints), use_container_width=True)
+            st.dataframe(pd.DataFrame(result.text_endpoints), width="stretch")
 
-    tracking = render_tracking_inputs(sha, stash["doi"])
+    tracking = render_tracking_inputs(sha, paper.doi)
     note = st.text_input("Review note (optional)", key=f"note_{sha}")
     override = False
     if not result.qa_report.passed:
@@ -493,68 +384,13 @@ def render_review_queue() -> None:
         if not result.qa_report.passed and not override:
             st.error("Red QA flags present — tick the override box to merge anyway.")
             st.stop()
-        edited_clean = schema.coerce_schema(edited)
-        was_edited = not edited_clean.reset_index(drop=True).equals(
-            result.df.reset_index(drop=True)
-        )
-        merge_note = note or ("edited in review" if was_edited else None)
-        conn = connection.get_conn()
-        try:
-            summary = merge.commit_extraction(
-                conn,
-                content_sha256=stash["sha"],
-                pdf_path=stash["pdf_path"],
-                df=edited_clean,
-                text_endpoints=result.text_endpoints,
-                prompt_version=result.prompt_version,
-                prompt_sha256=result.prompt_sha256,
-                model=result.model,
-                qa_passed=result.qa_report.passed,
-                qa_report_json=result.qa_report.to_json(),
-                raw_response=result.raw_response,
-                doi=stash["doi"],
-                reference_no=_first_value(edited_clean, "Reference No."),
-                title=stash["meta"].get("title"),
-                original_filename=stash["filename"],
-                figure_type=None,
-                is_raster_figure=stash["meta"].get("is_raster_figure"),
-                tracking=tracking,
-                note=merge_note,
-                override=override,
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
-                cache_creation_input_tokens=result.cache_creation_input_tokens,
-                cache_read_input_tokens=result.cache_read_input_tokens,
-            )
-        finally:
-            conn.close()
-        # Export the approved per-paper artifact, named to match the tracking
-        # sheet's `Output file` column (e.g. Swain_&_Otu_322.csv).
-        export_path = config.EXPORTS_DIR / naming.export_filename(
-            tracking["short_citation"], summary["paper_id"], summary["rows_merged"]
-        )
-        edited_clean.to_csv(export_path, index=False)
-        merged_msg = (
-            f"Merged {summary['rows_merged']} rows → paper_id={summary['paper_id']}, "
-            f"prompt_run_id={summary['prompt_run_id']}. Export: {export_path.name}"
-        )
-        if summary["superseded_run_id"] is not None:
-            # Retiring a previously approved run changes what the calculator and
-            # assistant see, so don't let it happen silently.
-            merged_msg += (
-                f" Superseded the earlier approved run "
-                f"(prompt_run_id={summary['superseded_run_id']}) for this prompt version; "
-                "its rows stay in the DB but are no longer current."
-            )
-        st.success(merged_msg)
-        pending.pop(sha, None)
-        _delete_staging_files(sha)
+        _approve(sha, staged, edited, tracking, note, override)
         st.rerun()
 
     if col_b.button("🗑️ Reject", key=f"reject_{sha}"):
         pending.pop(sha, None)
-        _delete_staging_files(sha)
-        st.info(f"{stash['filename']} rejected and discarded (nothing written to the master DB).")
+        staging.discard(sha)
+        st.info(f"{paper.filename} rejected and discarded (nothing written to the master DB).")
         st.rerun()
 
     # The middle option between "approve anyway" and "throw it away": re-run
@@ -570,16 +406,14 @@ def render_review_queue() -> None:
         with st.spinner("Re-extracting with the QA findings as feedback — this runs one full synchronous extraction..."):
             try:
                 new_result = runner.extract_paper(
-                    Path(stash["pdf_path"]).read_bytes(),
-                    figure_is_curve=stash.get("figure_is_curve", True),
+                    Path(paper.pdf_path).read_bytes(),
+                    figure_is_curve=staged.figure_is_curve,
                     qa_feedback=feedback,
                 )
             except Exception as e:
                 st.error(f"Re-extraction failed (previous staged result kept): {e}")
                 st.stop()
-        new_result.df.to_excel(_staging_path(sha), index=False, engine="openpyxl")
-        stash["result"] = new_result
-        _save_staging_meta(sha, stash, new_result)
+        pending[sha] = staging.stage(paper, staged.figure_is_curve, new_result)
         st.rerun()
 
 
@@ -587,9 +421,8 @@ def render_review_queue() -> None:
 # Main flow
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    _restore_staging_queue()
     st.title("REE Extraction Dashboard")
-    st.caption("Phase A2 — batch PDF upload → 26-column tables → review → merge")
+    st.caption("Batch PDF upload → 26-column tables → QA → review → merge")
 
     uploaded_files = st.file_uploader(
         "Upload one or more research-paper PDFs", type=["pdf"], accept_multiple_files=True
@@ -611,18 +444,18 @@ def main() -> None:
         [
             {
                 "Include": True,
-                "File": p["filename"],
-                "DOI": p["doi"] or "—",
-                "Pages": p["meta"]["n_pages"],
-                "Raster?": "yes" if p["meta"]["is_raster_figure"] else "no/unknown",
-                "Status": p["status"],
+                "File": p.paper.filename,
+                "DOI": p.paper.doi or "—",
+                "Pages": p.paper.meta["n_pages"],
+                "Raster?": "yes" if p.paper.meta["is_raster_figure"] else "no/unknown",
+                "Status": p.status,
             }
             for p in previews
         ]
     )
     edited_table = st.data_editor(
         table,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         disabled=["File", "DOI", "Pages", "Raster?", "Status"],
         key="batch_table",
@@ -637,15 +470,14 @@ def main() -> None:
         "usually done within an hour, up to 24h)",
         value=False,
         help=(
-            "Unverified against the live API: code execution + Files API document "
-            "blocks + task budgets inside a batched request hasn't been confirmed "
-            "to work together (each is documented independently, not this exact "
-            "combination). Test on 1-2 papers before trusting it for a full run."
+            "Verified live once (2026-07-29, ~$2.26/paper, accuracy matching the "
+            "synchronous baseline). Still worth a 1-2 paper trial before a full "
+            "run after any change to the request shape."
         ),
     )
 
     selected = [p for p, inc in zip(previews, edited_table["Include"]) if inc]
-    dup_selected = [p for p in selected if p["status"] != "new"]
+    dup_selected = [p for p in selected if p.status != "new"]
     if dup_selected:
         st.warning(
             f"{len(dup_selected)} selected file(s) already exist in the DB — "
@@ -668,13 +500,6 @@ def main() -> None:
 
     render_batch_jobs()
     render_review_queue()
-
-
-def _first_value(df: pd.DataFrame, col: str):
-    if col not in df.columns or df.empty:
-        return None
-    s = df[col].dropna()
-    return None if s.empty else str(s.iloc[0])
 
 
 # Streamlit executes this module top-to-bottom on every interaction.

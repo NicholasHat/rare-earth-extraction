@@ -15,7 +15,7 @@ _postprocess):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -37,7 +37,7 @@ class ExtractionResult:
     raw_response: str
     coercion_failures: int
     curve_analysis: str = ""          # the injected deterministic pre-pass block
-    deterministic_counts: list[int] = None  # authoritative per-series marker counts
+    deterministic_counts: list[int] = field(default_factory=list)  # authoritative per-series marker counts
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
