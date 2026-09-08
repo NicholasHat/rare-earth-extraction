@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from extraction import anthropic_client, parse_output
-from extraction.anthropic_client import _continue_until_done, collect_batch_results
+from extraction.anthropic_client import BatchRequest, _continue_until_done, collect_batch_results
 
 
 def _msg(stop_reason: str, text: str = "final text", *, usage=None):
@@ -105,13 +105,13 @@ def test_collect_batch_results_continues_paused_batch_item():
         result=SimpleNamespace(type="succeeded", message=_msg("pause_turn", "partial")),
     )
     resolved = _msg("end_turn", "finished")
-    items = [("sha1", "prompt text", "file_123", None, "claude-opus-4-8")]
+    requests = [BatchRequest("sha1", "prompt text", "claude-opus-4-8")]
 
     with patch("anthropic.Anthropic") as mock_anthropic:
         client = _fake_client([resolved])
         client.beta.messages.batches.results.return_value = [batch_result]
         mock_anthropic.return_value = client
-        out = collect_batch_results("batch_1", items)
+        out = collect_batch_results("batch_1", requests, {"sha1": "file_123"})
 
     assert client.beta.messages.stream.call_count == 1
     assert isinstance(out["sha1"], anthropic_client.ExtractResponse)
@@ -123,13 +123,13 @@ def test_collect_batch_results_passes_through_finished_item_untouched():
         custom_id="sha1",
         result=SimpleNamespace(type="succeeded", message=_msg("end_turn", "already done")),
     )
-    items = [("sha1", "prompt text", "file_123", None, "claude-opus-4-8")]
+    requests = [BatchRequest("sha1", "prompt text", "claude-opus-4-8")]
 
     with patch("anthropic.Anthropic") as mock_anthropic:
         client = _fake_client([])  # no continuation call should happen
         client.beta.messages.batches.results.return_value = [batch_result]
         mock_anthropic.return_value = client
-        out = collect_batch_results("batch_1", items)
+        out = collect_batch_results("batch_1", requests, {"sha1": "file_123"})
 
     client.beta.messages.stream.assert_not_called()
     assert out["sha1"].text == "already done"
@@ -143,7 +143,7 @@ def test_collect_batch_results_surfaces_errored_item():
         client = _fake_client([])
         client.beta.messages.batches.results.return_value = [batch_result]
         mock_anthropic.return_value = client
-        out = collect_batch_results("batch_1", [("sha1", "p", "f", None, "m")])
+        out = collect_batch_results("batch_1", [BatchRequest("sha1", "p", "m")], {"sha1": "f"})
 
     assert isinstance(out["sha1"], RuntimeError)
     assert "did not succeed" in str(out["sha1"])
@@ -165,10 +165,11 @@ def test_collect_batch_results_isolates_a_failed_continuation():
         custom_id="sha_ok",
         result=SimpleNamespace(type="succeeded", message=_msg("end_turn", "all good")),
     )
-    items = [
-        ("sha_paused", "p", "file_1", None, "claude-sonnet-5"),
-        ("sha_ok", "p", "file_2", None, "claude-sonnet-5"),
+    requests = [
+        BatchRequest("sha_paused", "p", "claude-sonnet-5"),
+        BatchRequest("sha_ok", "p", "claude-sonnet-5"),
     ]
+    file_ids = {"sha_paused": "file_1", "sha_ok": "file_2"}
 
     with patch("anthropic.Anthropic") as mock_anthropic:
         client = MagicMock()
@@ -177,7 +178,7 @@ def test_collect_batch_results_isolates_a_failed_continuation():
         # take the finished item down with it.
         client.beta.messages.batches.results.return_value = [paused, finished]
         mock_anthropic.return_value = client
-        out = collect_batch_results("batch_1", items)
+        out = collect_batch_results("batch_1", requests, file_ids)
 
     assert isinstance(out["sha_paused"], _NotARuntimeError)
     assert out["sha_ok"].text == "all good"

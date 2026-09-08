@@ -20,7 +20,6 @@ Two ways to run an extraction, sharing the same request shape (_message_kwargs):
     iteration cap than the sync path, so most papers never pause here; a
     `pause_turn` result is transparently finished off with a synchronous
     continuation (`_continue_until_done`) rather than surfaced as an error.
-    See the flag on that section below before relying on it for a full run.
 
 Only `end_turn` counts as a finished response. Every other `stop_reason` is a
 hard failure (surfaced as a specific RuntimeError, not a bare parse error) —
@@ -55,16 +54,6 @@ class ExtractResponse:
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
-
-
-def _usage_from_message(message) -> tuple[int, int, int, int]:
-    u = message.usage
-    return (
-        u.input_tokens,
-        u.output_tokens,
-        getattr(u, "cache_creation_input_tokens", None) or 0,
-        getattr(u, "cache_read_input_tokens", None) or 0,
-    )
 
 
 _STOP_REASON_ERRORS = {
@@ -187,41 +176,25 @@ def _message_kwargs(
     )
 
 
-def _response_from_message(message) -> ExtractResponse:
-    _check_stop_reason(message.stop_reason)
-    text = "\n".join(block.text for block in message.content if block.type == "text").strip()
-    input_tokens, output_tokens, cache_creation, cache_read = _usage_from_message(message)
-    return ExtractResponse(
-        text=text,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation,
-        cache_read_input_tokens=cache_read,
-    )
-
-
-def _response_from_message_chain(messages: list) -> ExtractResponse:
-    """Like _response_from_message, but for a chain of pause_turn continuations:
-    only the final message carries finished output, but every message in the
-    chain is a separately billed API call, so usage is summed across all of
-    them."""
+def _response_from_chain(messages: list) -> ExtractResponse:
+    """Build the response from a message chain: one message normally, more when
+    pause_turn continuations were needed. Only the final message carries the
+    finished output, but every message in the chain was a separately billed
+    API call, so usage is summed across all of them."""
     _check_stop_reason(messages[-1].stop_reason)
     text = "\n".join(
         block.text for block in messages[-1].content if block.type == "text"
     ).strip()
-    input_tokens = output_tokens = cache_creation = cache_read = 0
-    for m in messages:
-        it, ot, cc, cr = _usage_from_message(m)
-        input_tokens += it
-        output_tokens += ot
-        cache_creation += cc
-        cache_read += cr
+
+    def total(attr: str) -> int:
+        return sum(getattr(m.usage, attr, None) or 0 for m in messages)
+
     return ExtractResponse(
         text=text,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation,
-        cache_read_input_tokens=cache_read,
+        input_tokens=total("input_tokens"),
+        output_tokens=total("output_tokens"),
+        cache_creation_input_tokens=total("cache_creation_input_tokens"),
+        cache_read_input_tokens=total("cache_read_input_tokens"),
     )
 
 
@@ -297,7 +270,7 @@ def extract(
     finally:
         client.beta.files.delete(uploaded.id)
 
-    return _response_from_message_chain(chain)
+    return _response_from_chain(chain)
 
 
 # --------------------------------------------------------------------------- #
@@ -307,13 +280,27 @@ def extract(
 # papers never hit pause_turn here at all; the rare one that does is finished
 # off synchronously — see collect_batch_results.
 #
-# ASSUMPTION FLAGGED FOR VERIFICATION: the public docs describe code
-# execution, Files API document blocks, and task budgets each independently,
-# but not this specific combination running inside a *batched* (non-
-# streaming, asynchronously processed) request. Test on 1-2 papers before
-# relying on this for a full run — see README §"Building next" / the Batch
-# API entry in prompts/CHANGELOG.md.
+# Code execution + Files API document blocks + task budgets inside a batched
+# request was verified live on 2026-07-29 (~$2.26/paper on Sonnet 5, ~96%
+# cache-served, accuracy matching the synchronous baseline). Re-verify on 1-2
+# papers after any change to _message_kwargs before trusting a full run.
 # --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class BatchRequest:
+    """One paper's request in a Batches API job — everything needed to build
+    (or, for a paused item, rebuild) its Messages API call. `custom_id` must be
+    unique within the batch; callers use the paper's content sha256."""
+    custom_id: str
+    prompt_text: str
+    model: str
+    analysis_block: str | None = None
+
+    def message_kwargs(self, file_id: str) -> dict:
+        return _message_kwargs(
+            self.prompt_text, file_id, model=self.model, analysis_block=self.analysis_block
+        )
 
 
 @dataclass(frozen=True)
@@ -322,27 +309,21 @@ class BatchSubmission:
     file_ids: dict[str, str]   # custom_id -> uploaded Files API id (cleanup after collection)
 
 
-def submit_batch(
-    items: list[tuple[str, str, bytes, str | None]], *, model: str | None = None
-) -> BatchSubmission:
-    """Upload each paper's PDF and submit one Batches API job covering all of them.
-
-    `items` is a list of (custom_id, prompt_text, pdf_bytes, analysis_block).
-    `custom_id` must be unique within the batch — callers use the paper's
-    content sha256.
-    """
-    model = model or config.EXTRACTION_MODEL
+def submit_batch(requests: list[BatchRequest], pdfs: dict[str, bytes]) -> BatchSubmission:
+    """Upload each paper's PDF (`pdfs` is keyed by custom_id) and submit one
+    Batches API job covering every request."""
     client = anthropic.Anthropic()
 
     file_ids: dict[str, str] = {}
-    requests = []
-    for custom_id, prompt_text, pdf_bytes, analysis_block in items:
-        uploaded = client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf"))
-        file_ids[custom_id] = uploaded.id
-        kwargs = _message_kwargs(prompt_text, uploaded.id, model=model, analysis_block=analysis_block)
-        requests.append({"custom_id": custom_id, "params": kwargs})
+    params = []
+    for req in requests:
+        uploaded = client.beta.files.upload(
+            file=("paper.pdf", pdfs[req.custom_id], "application/pdf")
+        )
+        file_ids[req.custom_id] = uploaded.id
+        params.append({"custom_id": req.custom_id, "params": req.message_kwargs(uploaded.id)})
 
-    batch = client.beta.messages.batches.create(betas=_BETAS, requests=requests)
+    batch = client.beta.messages.batches.create(betas=_BETAS, requests=params)
     return BatchSubmission(batch_id=batch.id, file_ids=file_ids)
 
 
@@ -353,15 +334,14 @@ def poll_batch_status(batch_id: str) -> str:
 
 
 def collect_batch_results(
-    batch_id: str, items: list[tuple[str, str, str, str | None, str]]
+    batch_id: str, requests: list[BatchRequest], file_ids: dict[str, str]
 ) -> dict[str, ExtractResponse | Exception]:
     """Fetch results once the batch has ended. Keyed by custom_id.
 
-    `items` is (custom_id, prompt_text, file_id, analysis_block, model) for
-    every request originally submitted — the same shape `submit_batch`'s
-    `items` accepts, but with the already-uploaded `file_id` in place of raw
-    `pdf_bytes` (no need to re-upload). Only used to rebuild the request for a
-    paused item (below); an item that finished cleanly never touches it.
+    `requests` are the same BatchRequests originally submitted and `file_ids`
+    their already-uploaded PDFs (no need to re-upload). Both are only used to
+    rebuild the request for a paused item (below); an item that finished
+    cleanly never touches them.
 
     A result that errored/canceled/expired — or that raises while being read or
     continued — is surfaced as an Exception value rather than raised, so one bad
@@ -377,10 +357,7 @@ def collect_batch_results(
     of the batch stays batch-discounted.
     """
     client = anthropic.Anthropic()
-    by_id = {
-        custom_id: (prompt_text, file_id, analysis_block, model)
-        for custom_id, prompt_text, file_id, analysis_block, model in items
-    }
+    by_id = {req.custom_id: req for req in requests}
     out: dict[str, ExtractResponse | Exception] = {}
     for result in client.beta.messages.batches.results(batch_id):
         if result.result.type != "succeeded":
@@ -390,15 +367,12 @@ def collect_batch_results(
             continue
         message = result.result.message
         try:
+            chain = [message]
             if message.stop_reason == "pause_turn":
-                prompt_text, file_id, analysis_block, model = by_id[result.custom_id]
-                kwargs = _message_kwargs(
-                    prompt_text, file_id, model=model, analysis_block=analysis_block
-                )
-                chain = _continue_until_done(client, kwargs, [message])
-                out[result.custom_id] = _response_from_message_chain(chain)
-            else:
-                out[result.custom_id] = _response_from_message(message)
+                req = by_id[result.custom_id]
+                kwargs = req.message_kwargs(file_ids[result.custom_id])
+                chain = _continue_until_done(client, kwargs, chain)
+            out[result.custom_id] = _response_from_chain(chain)
         except Exception as e:
             # Deliberately broad. The continuation above makes live API calls,
             # so this catches anthropic.RateLimitError / APIStatusError /

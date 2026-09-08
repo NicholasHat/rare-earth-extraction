@@ -1,4 +1,4 @@
-"""Orchestrate extraction runs end to end (README §6, Phase A1).
+"""Orchestrate extraction runs end to end (plan §6).
 
   load pinned prompt -> call Anthropic API -> parse output -> run QA checks
 
@@ -138,8 +138,7 @@ def extract_paper(
 
 
 # --------------------------------------------------------------------------- #
-# Message Batches API path — see the flag in anthropic_client.py before
-# relying on this for a full run.
+# Message Batches API path
 # --------------------------------------------------------------------------- #
 
 
@@ -174,7 +173,8 @@ def submit_batch(
     model = model or config.EXTRACTION_MODEL
 
     items: dict[str, BatchItem] = {}
-    requests = []
+    requests: list[anthropic_client.BatchRequest] = []
+    pdfs: dict[str, bytes] = {}
     for custom_id, pdf_bytes in papers:
         analysis_block, deterministic_counts = _prepass(pdf_bytes)
         items[custom_id] = BatchItem(
@@ -186,10 +186,20 @@ def submit_batch(
             prompt_sha256=bundle.sha256,
             model=model,
         )
-        requests.append((custom_id, bundle.text, pdf_bytes, analysis_block or None))
+        requests.append(_batch_request(items[custom_id], bundle.text))
+        pdfs[custom_id] = pdf_bytes
 
-    submission = anthropic_client.submit_batch(requests, model=model)
+    submission = anthropic_client.submit_batch(requests, pdfs)
     return submission.batch_id, items, submission.file_ids
+
+
+def _batch_request(item: BatchItem, prompt_text: str) -> anthropic_client.BatchRequest:
+    return anthropic_client.BatchRequest(
+        custom_id=item.custom_id,
+        prompt_text=prompt_text,
+        model=item.model,
+        analysis_block=item.analysis_block or None,
+    )
 
 
 def batch_status(batch_id: str) -> str:
@@ -212,21 +222,15 @@ def collect_batch(
     reuse the already-uploaded `file_id` rather than re-uploading the PDF.
     """
     prompt_text_by_version: dict[str, str] = {}
-    request_items = []
-    for custom_id, item in items.items():
+    requests = []
+    for item in items.values():
         if item.prompt_version not in prompt_text_by_version:
             prompt_text_by_version[item.prompt_version] = prompt_loader.load_prompt(
                 item.prompt_version
             ).text
-        request_items.append((
-            custom_id,
-            prompt_text_by_version[item.prompt_version],
-            file_ids[custom_id],
-            item.analysis_block or None,
-            item.model,
-        ))
+        requests.append(_batch_request(item, prompt_text_by_version[item.prompt_version]))
 
-    raw_results = anthropic_client.collect_batch_results(batch_id, request_items)
+    raw_results = anthropic_client.collect_batch_results(batch_id, requests, file_ids)
     out: dict[str, ExtractionResult | Exception] = {}
     for custom_id, item in items.items():
         raw = raw_results.get(custom_id)

@@ -4,6 +4,7 @@ through the already-uploaded file_id, rather than needing the raw PDF again."""
 from unittest.mock import patch
 
 from extraction import runner
+from extraction.anthropic_client import BatchRequest
 from extraction.runner import BatchItem
 
 
@@ -24,9 +25,10 @@ def test_collect_batch_builds_request_items_with_reloaded_prompt_and_file_id():
 
     captured = {}
 
-    def _fake_collect_batch_results(batch_id, request_items):
+    def _fake_collect_batch_results(batch_id, requests, file_ids):
         captured["batch_id"] = batch_id
-        captured["request_items"] = request_items
+        captured["requests"] = requests
+        captured["file_ids"] = file_ids
         return {}
 
     with patch.object(runner.anthropic_client, "collect_batch_results", side_effect=_fake_collect_batch_results), \
@@ -37,9 +39,10 @@ def test_collect_batch_builds_request_items_with_reloaded_prompt_and_file_id():
     # Prompt reloaded once per distinct version (both items share extraction_v8) — not once per item.
     mock_load.assert_called_once_with("extraction_v8")
     assert captured["batch_id"] == "batch_1"
-    by_id = {row[0]: row for row in captured["request_items"]}
-    assert by_id["sha1"] == ("sha1", "PROMPT TEXT", "file_1", "block-1", "claude-opus-4-8")
-    assert by_id["sha2"] == ("sha2", "PROMPT TEXT", "file_2", None, "claude-opus-4-8")
+    assert captured["file_ids"] == file_ids
+    by_id = {req.custom_id: req for req in captured["requests"]}
+    assert by_id["sha1"] == BatchRequest("sha1", "PROMPT TEXT", "claude-opus-4-8", "block-1")
+    assert by_id["sha2"] == BatchRequest("sha2", "PROMPT TEXT", "claude-opus-4-8", None)
 
 
 def _item(custom_id):
