@@ -2,7 +2,7 @@
 
 A report is a list of flags plus a roll-up verdict. RED flags gate the merge
 (approving anyway requires an explicit override + a review_log note, see
-README §6 Phase A4); AMBER flags are advisory.
+plan §6); AMBER flags are advisory.
 """
 from __future__ import annotations
 

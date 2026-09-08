@@ -1,7 +1,13 @@
 # Development Plan — Deterministic PDF Curve Extractor
 
-**Status:** v1 built in `extraction/curve_extractor/` (101 tests pass). Not yet wired into
-the live pipeline (no `extraction_v6` prompt / runner pre-pass yet — that's the remaining M5).
+**Status (2026-09-07):** built and live. M1–M5 are all shipped: `extraction/curve_extractor/`
+is wired into the pipeline through `extraction/curve_prepass.py`, which has run before every
+model call since `extraction_v6` (marker counts as a grounding anchor + QA cross-check) and,
+since `extraction_v8`, also hands the model the calibrated (x, y) coordinates for
+authoritative vector pages. Stroked-glyph assembly (§4.2, M4's "second paper" case) exists as
+`markers.assemble_stroked` but is still excluded from the authoritative gate for want of an
+oracle paper — see "Open items" below. The sections after "Implementation status" are the
+original design and are kept as-is for rationale.
 **Goal:** replace LLM-guessed marker clustering / axis calibration with deterministic,
 unit-tested Python, leaving the LLM only the genuinely-visual and schema-formatting work.
 
@@ -29,9 +35,23 @@ Two validation papers probed with `pdfplumber`, revealing a fork the plan only h
   *values* from chars is brittle on multi-panel figures, so it gracefully returns `calibration=None`
   + a warning and relies on the LLM-supplied tick seam (§3) — as the plan intended.
 
-**Built:** `types.py`, `calibrate.py`, `detect.py`, `markers.py` (vector), `raster.py` (raster),
-`extractor.py` (auto-routing on `is_vector`). **Remaining:** raster panel/text segmentation; the
-M5 pipeline integration (`extraction_v6` + runner pre-pass).
+**Built:** `types.py`, `calibrate.py`, `detect.py`, `markers.py` (vector, filled + stroked),
+`raster.py` (raster, scikit-image shape families + template-match recovery), `extractor.py`
+(auto-routing on `is_vector`), and the `curve_prepass.py` integration (M5).
+
+**Open items:**
+- **Stroked/monochrome series as ground truth.** `assemble_stroked` recovers ×/+/✶ glyphs
+  (confirmed on Swain & Otu Fig. 2, where Nd uses a plus marker), but recovery is incomplete
+  (7 of ~19 Nd points) and there is no oracle-paper count for it, so `curve_prepass.analyze`
+  filters to `marker_type == "filled"` before the uniformity / panel-merge / authoritative
+  logic. Admitting stroked series needs the §5.2 second-paper fixture first.
+- **Tick-label reading (`calibrate.auto_ticks`).** The v8 coordinate hand-off only fires when
+  both axes calibrate `ok`; on pages where tick labels can't be read the pre-pass degrades to
+  counts only. Its success rate across real papers is unmeasured.
+- **Panel-merge detection** (`curve_prepass._looks_panel_merged`) catches side-by-side panels
+  via a balanced x-split; stacked panels with identical x ranges still rely on the
+  count-uniformity gate alone.
+- **Raster panel/text segmentation** — raster pages remain estimate-tier (never authoritative).
 
 ---
 

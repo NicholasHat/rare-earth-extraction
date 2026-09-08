@@ -3,7 +3,7 @@
 Checks the content hash (dedup key #2) and the parsed DOI (dedup key #1) against
 the `papers` table. A match doesn't hard-block — it surfaces the existing paper
 so the reviewer can choose to skip, or re-extract as a new run under a newer
-prompt version (the coexistence path, README §6 Phase A3).
+prompt version (the coexistence path, plan §6).
 """
 from __future__ import annotations
 

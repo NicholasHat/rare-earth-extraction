@@ -1,7 +1,8 @@
 """Lightweight PDF triage: raster-vs-vector hint and a title guess (README §6).
 
-Phase A1 only needs a coarse hint. `is_raster_figure` flags papers whose figures
-are bitmap images (higher digitizing risk per README §9) vs. vector graphics.
+`is_raster_figure` flags papers whose figures are bitmap images (higher
+digitizing risk per plan §9) vs. vector graphics — a coarse upload-time hint;
+the deterministic curve pre-pass makes the real per-page vector/raster call.
 The heuristic: a page carrying embedded image XObjects but little extractable
 text is likely a scanned/raster figure page. This is a hint, not a guarantee —
 the reviewer confirms.

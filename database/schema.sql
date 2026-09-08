@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS prompt_runs (
     paper_id         INTEGER NOT NULL REFERENCES papers(paper_id),
     prompt_version   TEXT NOT NULL,         -- e.g. 'extraction_v5.1'
     prompt_sha256    TEXT NOT NULL,         -- hash of the prompt file actually used
-    model            TEXT NOT NULL,         -- e.g. 'claude-opus-4-8'
+    model            TEXT NOT NULL,         -- e.g. 'claude-sonnet-5'
     status           TEXT NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending','approved','rejected')),
     run_timestamp    TEXT NOT NULL DEFAULT (datetime('now')),

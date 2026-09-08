@@ -2,7 +2,7 @@
 
 ![status](https://img.shields.io/badge/status-actively%20developing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![tests](https://img.shields.io/badge/tests-113%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-215%20passing-brightgreen)
 
 A web app that turns rare-earth-element (REE) solvent-extraction **research
 papers into a structured, queryable database** — digitizing the data locked
@@ -11,10 +11,10 @@ natural-language assistant. The automation is treated as *untrusted*: every
 number is versioned, QA-checked, and human-reviewed before it's trusted.
 
 > **Status:** the full spine is working and tested — ingestion, a versioned
-> LLM extraction pipeline, an automatic QA suite, human review & merge, a
-> calculator, and a tool-calling assistant. I'm actively extending it with a
-> deterministic figure pre-pass and live validation on real papers — see the
-> [roadmap](#roadmap).
+> LLM extraction pipeline with a deterministic figure pre-pass, an automatic
+> QA suite, human review & merge, a calculator, and a tool-calling assistant.
+> Current work is live validation on real papers and widening what the
+> deterministic pre-pass can vouch for — see the [roadmap](#roadmap).
 
 Built to solve a real problem for a UCI chemistry lab (thousands of papers,
 none of them machine-readable) and, along the way, to work through the hard
@@ -28,8 +28,10 @@ gating, and a strict read/write boundary.
   [extractant]* plot into a fixed 26-column table, one row per data point per
   element
 - 🔎 **Grounds the model against itself** — a deterministic pre-pass counts
-  figure markers straight from the PDF's own vector geometry and feeds the
-  count back as ground truth, directly attacking silent under-digitization
+  figure markers straight from the PDF's own vector geometry, calibrates the
+  axes, and hands the model both the counts and the (x, y) coordinates as
+  ground truth, directly attacking silent under-digitization and the cost of
+  the model doing that work itself
 - ✅ **Auto-QAs every extraction** — row-count sanity, axis-range bounds,
   monotonicity, duplicates, vocabulary drift, and cross-checks against the
   paper's own stated numbers; failures **gate the merge**
@@ -37,7 +39,9 @@ gating, and a strict read/write boundary.
   editable grid; data enters the database only on approval, via one atomic
   transaction with a full audit log
 - 🧮 **Does the bench math** — an open calculator handles ppm ↔ mM /
-  molar-ratio / concentration conversions, sanity-checked against the dataset
+  molar-ratio / concentration conversions, sanity-checked against the dataset,
+  and predicts Extract% at a target pH by interpolating inside prior papers'
+  measured sweeps (never extrapolating)
 - 💬 **Answers questions in plain English** — a tool-calling assistant queries
   the database and calls the calculator, and is architecturally prevented from
   inventing numbers
@@ -77,10 +81,10 @@ assistant is just writing a function and registering it as a tool.
 | Area | Choice |
 |---|---|
 | Language | Python 3.11+ |
-| LLM | Anthropic API — Claude Opus (extraction) · Claude Haiku (assistant, tool-calling) |
+| LLM | Anthropic API — Claude Sonnet 5 (extraction, with code execution + Files API; Batch API optional) · Claude Haiku (assistant, tool-calling) |
 | UI | Streamlit (multi-page) |
 | Database | SQLite (read-only mode for consumers) + a `v_current_best` view |
-| PDF / figures | pdfplumber · pypdf · NumPy / SciPy (deterministic curve extraction) |
+| PDF / figures | pdfplumber · pypdf · NumPy / SciPy / scikit-image (deterministic curve extraction) |
 | Data | pandas · openpyxl |
 | Tests | pytest (offline, no API calls) |
 
@@ -125,12 +129,15 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 113 tests, no live model or network required
+python -m pytest        # 215 tests, no live model or network required
 ```
 
-The suite covers unit conversions, the solve-for-the-blank calculator, the QA
-checks, dedup, the atomic merge transaction, the read-only SQL guard, the
-deterministic curve pre-pass, and the assistant's tools.
+The suite covers unit conversions, the solve-for-the-blank calculator and its
+Extract% prediction, the QA checks, dedup, the atomic merge transaction and
+version supersession, the read-only SQL guard, the deterministic curve
+extractor and pre-pass, the extraction client's continuation and batch
+handling, the review-queue persistence, the tracking sheet, and the
+assistant's tools.
 
 ## Roadmap
 
@@ -142,14 +149,25 @@ deterministic curve pre-pass, and the assistant's tools.
 - [x] Content-hash + DOI de-duplication before extraction
 - [x] Full automatic QA suite with red/amber flags and merge gating
 - [x] Deterministic vector-figure curve pre-pass as a grounding anchor (`extraction_v6`)
-- [x] Human review / edit / merge with an append-only audit log
-- [x] Bench calculator with database sanity-checking (Pillar B)
+      and as a digitizer handing the model pre-calibrated coordinates (`extraction_v8`)
+- [x] Human review / edit / merge with an append-only audit log, plus an on-demand
+      "re-extract with QA feedback" middle path
+- [x] Message Batches API path (50% cheaper) with transparent continuation of paused items
+- [x] Per-run token/cost telemetry and prompt caching across the code-execution loop
+- [x] Bench calculator with database sanity-checking and Extract% prediction (Pillar B)
 - [x] Tool-calling AI assistant over a guarded read-only SQL tool (Pillar C)
+- [x] Tracking-sheet view mirroring the lab's paper-tracking spreadsheet, with per-paper exports
 
 **Building next**
 
-- [ ] **Live validation of `extraction_v9`** against a real corpus, and tuning
-      the QA tolerances (text-endpoint %E / pH thresholds) on the first dozen papers
+- [ ] **Live validation** of the 2026-07/08 changes that have only unit tests so far —
+      `extraction_v9`'s log-log sweep recovery, the panel-merge gate, QA-feedback
+      re-extraction, and the scikit-image raster path — then tuning the QA
+      tolerances (text-endpoint %E / pH thresholds) on the first dozen papers
+- [ ] **Monochrome figures as ground truth** — stroked-glyph markers (×/+/✶) are
+      now assembled but need an oracle paper before the pre-pass can vouch for them
+- [ ] **Axis tick-label reading** success rate on real papers — the coordinate
+      hand-off only fires when both axes calibrate
 - [ ] **Reliable per-series counts on raster figures** — the vector path is
       ground truth today; the raster CV path is still a lower-confidence estimate
 - [ ] Bulk / selective re-extraction workflow when a new prompt version ships

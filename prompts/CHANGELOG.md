@@ -35,7 +35,10 @@ Old versions are never edited or deleted.
   (marker-shape) series are explicitly excluded; that assembly path isn't
   implemented (docs/curve_extractor_plan.md), so those series still receive
   full Steps 3-5 treatment regardless of what else on the page is pre-digitised.
-  Estimate/raster pages are unaffected.
+  Estimate/raster pages are unaffected. *(Update 2026-08-27: stroked-glyph
+  assembly now exists — `markers.assemble_stroked` — but is still kept out of
+  this block and the authoritative gate until it has an oracle-paper
+  validation; the prompt text is unchanged.)*
 - No change to the QA layer: `deterministic_curve_count` still cross-checks
   row counts exactly as before — the new coordinate block is a prompt-side
   cost optimization, not a new ground-truth signal QA validates against.

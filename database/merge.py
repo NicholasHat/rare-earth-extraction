@@ -1,4 +1,4 @@
-"""Atomic merge of a reviewed extraction into the master DB (README §6, Phase A1).
+"""Atomic merge of a reviewed extraction into the master DB (plan §6).
 
 `commit_extraction` ties the per-table writes (papers, prompt_runs, extractions,
 text_endpoints, review_log) into one transaction so a partially-merged paper can
