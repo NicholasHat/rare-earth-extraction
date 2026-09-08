@@ -1,4 +1,4 @@
-"""Master database viewer (README §5) — papers, extraction run history, and
+"""Master database viewer (plan §5) — papers, extraction run history, and
 the review audit log. Moved here from the app.py sidebar so the sidebar stays
 free for navigation.
 
@@ -30,6 +30,7 @@ try:
     papers_df = browse.list_papers(conn)
     runs_df = browse.list_prompt_runs(conn)
     log_df = browse.list_review_log(conn)
+    best_df = extractions_repo.current_best(conn)
 finally:
     conn.close()
 
@@ -59,7 +60,7 @@ with tab_summary:
     if tracking_df.empty:
         st.info("No papers yet — upload one on the home page.")
     else:
-        st.dataframe(tracking_df, use_container_width=True, hide_index=True)
+        st.dataframe(tracking_df, width="stretch", hide_index=True)
         st.download_button(
             "Download tracking CSV",
             data=tracking_df.to_csv(index=False),
@@ -67,32 +68,27 @@ with tab_summary:
             mime="text/csv",
         )
         with st.expander("Extra detail (per-element rows, pH range, prompt version)"):
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(summary_df, width="stretch", hide_index=True)
 
 with tab_papers:
     if papers_df.empty:
         st.info("No papers yet — upload one on the home page.")
     else:
-        st.dataframe(papers_df, use_container_width=True, hide_index=True)
+        st.dataframe(papers_df, width="stretch", hide_index=True)
 
 with tab_runs:
     if runs_df.empty:
         st.info("No extraction runs yet.")
     else:
-        st.dataframe(runs_df, use_container_width=True, hide_index=True)
+        st.dataframe(runs_df, width="stretch", hide_index=True)
 
 with tab_log:
     if log_df.empty:
         st.info("No review actions logged yet.")
     else:
-        st.dataframe(log_df, use_container_width=True, hide_index=True)
+        st.dataframe(log_df, width="stretch", hide_index=True)
 
 with tab_data:
-    conn = connection.get_readonly_conn()
-    try:
-        best_df = extractions_repo.current_best(conn)
-    finally:
-        conn.close()
     if best_df.empty:
         st.info("No approved data yet.")
     else:
@@ -106,7 +102,7 @@ with tab_data:
             else best_df
         )
         st.write(f"{len(view)} row(s)")
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
         st.download_button(
             "Download CSV",
             data=view.to_csv(index=False),

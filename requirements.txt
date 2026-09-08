@@ -1,5 +1,5 @@
-# REE Extraction Dashboard — Phase A1 dependencies
-streamlit>=1.40
+# REE Extraction Dashboard dependencies
+streamlit>=1.50        # width='stretch' on st.dataframe / st.data_editor
 anthropic>=0.69
 pandas>=2.2
 openpyxl>=3.1          # XLSX export/read for staging artifacts

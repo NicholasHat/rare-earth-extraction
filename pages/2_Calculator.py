@@ -199,12 +199,12 @@ if st.button("Solve", type="primary"):
                     "measured ranges below (predictions are never extrapolated)."
                 )
             if prediction.matched:
-                st.dataframe(_series_rows(prediction.matched), use_container_width=True)
+                st.dataframe(_series_rows(prediction.matched), width="stretch")
             if prediction.off_condition:
                 with st.expander(
                     f"Sweeps under other conditions ({len(prediction.off_condition)}) — "
                     "same pair, different conc./feed"
                 ):
                     st.dataframe(
-                        _series_rows(prediction.off_condition), use_container_width=True
+                        _series_rows(prediction.off_condition), width="stretch"
                     )
