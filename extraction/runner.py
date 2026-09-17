@@ -15,7 +15,7 @@ _postprocess):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -54,6 +54,21 @@ def _prepass(pdf_bytes: bytes) -> tuple[str, list[int]]:
         return prepass.to_prompt_block(), prepass.authoritative_counts
     except Exception:
         return "", []
+
+
+def rerun_qa(result: ExtractionResult, *, figure_is_curve: bool) -> ExtractionResult:
+    """The same QA the extraction ran, re-applied to an already-staged result —
+    pure, no API call. Lets a paper staged before a check existed (or before a
+    check learned to name rows) pick up today's checks without paying for
+    another extraction. Everything but the report is carried over unchanged."""
+    report = checks.run(
+        result.df,
+        result.text_endpoints,
+        figure_is_curve=figure_is_curve,
+        coercion_failures=result.coercion_failures,
+        deterministic_counts=result.deterministic_counts,
+    )
+    return replace(result, qa_report=report)
 
 
 def _postprocess(

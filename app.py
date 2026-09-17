@@ -364,8 +364,35 @@ def render_review_queue() -> None:
     render_qa(result.qa_report)
     st.caption(_format_usage(result))
 
-    st.write(f"**{len(result.df)} rows extracted.** Edit cells below if needed.")
-    edited = st.data_editor(result.df, num_rows="dynamic", width="stretch", key=f"editor_{sha}")
+    # One click removes every row a QA check named as individually wrong
+    # (QAReport.flagged_rows — off-curve points, same-curve repeats). Series-
+    # level flags never name rows, so they can't be dropped this way; that is
+    # deliberate. The drop lives in this session only and is recorded on
+    # approval as an edit, with the rows in the review note. It resets the
+    # editor (new key), so drop first, then edit cells.
+    drop_key = f"dropped_{sha}"
+    dropped: list[int] = st.session_state.get(drop_key, [])
+    droppable = [r for r in result.qa_report.flagged_rows if r not in dropped]
+    col_drop, col_qa = st.columns(2)
+    if droppable and col_drop.button(
+        f"🧹 Drop the {len(droppable)} QA-flagged row(s)", key=f"drop_{sha}",
+        help="Rows named by the off-curve and duplicate checks: " + ", ".join(map(str, droppable)),
+    ):
+        st.session_state[drop_key] = sorted(dropped + droppable)
+        st.rerun()
+    # QA is pure and cheap; a paper staged before a check existed can pick up
+    # today's checks without another extraction. Replaces the staged report.
+    if col_qa.button("♻️ Re-run QA checks", key=f"requa_{sha}",
+                     help="Re-apply the current validation checks to this staged table (no API call)."):
+        staging.stage(paper, staged.figure_is_curve, runner.rerun_qa(result, figure_is_curve=staged.figure_is_curve))
+        st.session_state.pop(drop_key, None)
+        st.rerun()
+    if dropped:
+        st.caption(f"Dropped {len(dropped)} QA-flagged row(s) in this session: {', '.join(map(str, dropped))}.")
+    table = result.df.drop(index=[r - 1 for r in dropped if r - 1 in result.df.index])
+
+    st.write(f"**{len(table)} rows.** Edit cells below if needed.")
+    edited = st.data_editor(table, num_rows="dynamic", width="stretch", key=f"editor_{sha}_{len(dropped)}")
 
     if result.text_endpoints:
         with st.expander(f"Captured text endpoints ({len(result.text_endpoints)})"):
@@ -387,6 +414,8 @@ def render_review_queue() -> None:
         if not result.qa_report.passed and not override:
             st.error("Red QA flags present — tick the override box to merge anyway.")
             st.stop()
+        if dropped:
+            note = f"dropped {len(dropped)} QA-flagged row(s): {', '.join(map(str, dropped))}" + (f"; {note}" if note else "")
         _approve(sha, staged, edited, tracking, note, override)
         st.rerun()
 
