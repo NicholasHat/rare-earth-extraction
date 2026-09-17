@@ -21,6 +21,12 @@ Two ways to run an extraction, sharing the same request shape (_message_kwargs):
     `pause_turn` result is transparently finished off with a synchronous
     continuation (`_continue_until_done`) rather than surfaced as an error.
 
+`_continue_until_done` also resumes through `stop_reason="tool_use"`: the only
+tool offered is server-side, so a client-side tool call can only be the model
+misspelling that tool's name (seen live: `bash_code_execction`). Rather than
+lose the whole extraction to a typo, it is answered with an is_error
+tool_result naming the mistake and the model carries on.
+
 Only `end_turn` counts as a finished response. Every other `stop_reason` is a
 hard failure (surfaced as a specific RuntimeError, not a bare parse error) —
 see `_check_stop_reason`.
@@ -72,6 +78,11 @@ _STOP_REASON_ERRORS = {
         "server-side tool loop paused (stop_reason=pause_turn) with no automatic "
         "continuation available here — this paper needs more internal tool "
         "iterations than one turn allows"
+    ),
+    "tool_use": (
+        "model kept calling a client-side tool this pipeline does not provide "
+        "(stop_reason=tool_use — usually a misspelled server tool name) even "
+        "after being told so"
     ),
 }
 
@@ -205,22 +216,62 @@ def _response_from_chain(messages: list) -> ExtractResponse:
 _MAX_CONTINUATIONS = 5
 
 
+def _unknown_tool_calls(message) -> list:
+    return [block for block in message.content if block.type == "tool_use"]
+
+
+def _resumable(message) -> bool:
+    """A response that stopped short of end_turn but can be continued in place:
+    the server-side tool loop's iteration cap (pause_turn), or a client-side
+    tool call — which, with no client-side tools on offer, is the model
+    misspelling the server tool's name."""
+    return message.stop_reason == "pause_turn" or (
+        message.stop_reason == "tool_use" and bool(_unknown_tool_calls(message))
+    )
+
+
+def _transcript(user_content, chain: list) -> list[dict]:
+    """The conversation so far, replayed for a continuation call: the original
+    user turn, then every response in the chain as an assistant turn (the API
+    merges consecutive assistant turns), each unknown tool call answered with
+    an is_error tool_result so the model can correct itself."""
+    messages = [{"role": "user", "content": user_content}]
+    for message in chain:
+        messages.append({"role": "assistant", "content": message.content})
+        if message.stop_reason == "tool_use":
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "is_error": True,
+                        "content": (
+                            f"Unknown tool {call.name!r}. There are no client-side tools; "
+                            "the only tool available is the server-side code execution "
+                            "tool — call it by its exact name (e.g. bash_code_execution) "
+                            "and continue."
+                        ),
+                    }
+                    for call in _unknown_tool_calls(message)
+                ],
+            })
+    return messages
+
+
 def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list) -> list:
-    """Continue a message chain whose last entry paused (stop_reason=pause_turn),
-    re-sending the assistant's own (cumulative) partial response — the
-    documented continuation pattern for the server-side tool loop's iteration
-    cap — until a non-pause_turn stop reason or _MAX_CONTINUATIONS is hit.
-    `chain` must be non-empty; if its last message didn't pause, it's returned
-    unchanged. Appends to and returns `chain`."""
+    """Continue a message chain whose last entry is resumable (see _resumable),
+    re-sending the transcript so far — the documented continuation pattern for
+    the server-side tool loop's iteration cap, plus an error tool_result for a
+    misspelled tool call — until a non-resumable stop reason or
+    _MAX_CONTINUATIONS is hit. `chain` must be non-empty; if its last message
+    isn't resumable, it's returned unchanged. Appends to and returns `chain`."""
     user_content = kwargs["messages"][0]["content"]
 
     for _ in range(_MAX_CONTINUATIONS):
-        if chain[-1].stop_reason != "pause_turn":
+        if not _resumable(chain[-1]):
             return chain
-        messages = [
-            {"role": "user", "content": user_content},
-            {"role": "assistant", "content": chain[-1].content},
-        ]
+        messages = _transcript(user_content, chain)
         with client.beta.messages.stream(betas=_BETAS, **{**kwargs, "messages": messages}) as stream:
             chain.append(stream.get_final_message())
 
@@ -347,9 +398,10 @@ def collect_batch_results(
     continued — is surfaced as an Exception value rather than raised, so one bad
     paper doesn't lose the rest of the batch.
 
-    A paused item (stop_reason=pause_turn) is NOT treated as a terminal
-    failure: batch requests get a HIGHER per-turn iteration cap than
-    synchronous ones, so pausing anyway means a genuinely demanding paper.
+    A paused item (stop_reason=pause_turn, or a misspelled tool call — see
+    _resumable) is NOT treated as a terminal failure: batch requests get a
+    HIGHER per-turn iteration cap than synchronous ones, so pausing anyway
+    means a genuinely demanding paper.
     Anthropic's docs confirm a paused batch item can be continued via either
     a new batch request or a synchronous one — we use the latter (the same
     `_continue_until_done` the sync `extract()` path uses), so only the rare
@@ -368,7 +420,7 @@ def collect_batch_results(
         message = result.result.message
         try:
             chain = [message]
-            if message.stop_reason == "pause_turn":
+            if _resumable(message):
                 req = by_id[result.custom_id]
                 kwargs = req.message_kwargs(file_ids[result.custom_id])
                 chain = _continue_until_done(client, kwargs, chain)

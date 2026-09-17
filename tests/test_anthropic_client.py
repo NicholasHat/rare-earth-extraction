@@ -75,6 +75,7 @@ def test_check_stop_reason_accepts_only_a_finished_turn():
         ("max_tokens", "truncated"),
         ("model_context_window_exceeded", "context window"),
         ("pause_turn", "paused"),
+        ("tool_use", "misspelled"),
     ],
 )
 def test_check_stop_reason_reports_each_known_failure_specifically(stop_reason, expected):
@@ -182,3 +183,78 @@ def test_collect_batch_results_isolates_a_failed_continuation():
 
     assert isinstance(out["sha_paused"], _NotARuntimeError)
     assert out["sha_ok"].text == "all good"
+
+
+# --------------------------------------------------------------------------- #
+# Misspelled server-tool call (stop_reason=tool_use) — seen live as
+# `bash_code_execction`: answered with an error tool_result, not fatal.
+# --------------------------------------------------------------------------- #
+def _typo_msg(name="bash_code_execction", tool_id="toolu_1"):
+    return SimpleNamespace(
+        stop_reason="tool_use",
+        content=[
+            SimpleNamespace(type="text", text="Now let's test pdfplumber."),
+            SimpleNamespace(type="tool_use", id=tool_id, name=name, input={"command": "echo test"}),
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=20,
+                              cache_creation_input_tokens=0, cache_read_input_tokens=0),
+    )
+
+
+def _sent_messages(client, call_index=0):
+    return client.beta.messages.stream.call_args_list[call_index].kwargs["messages"]
+
+
+def test_misspelled_tool_call_is_answered_with_an_error_tool_result_and_resumed():
+    client = _fake_client([_msg("end_turn", "done")])
+    chain = _continue_until_done(client, _KWARGS, [_typo_msg()])
+
+    assert chain[-1].stop_reason == "end_turn"
+    sent = _sent_messages(client)
+    assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+    (result,) = sent[2]["content"]
+    assert result["type"] == "tool_result" and result["tool_use_id"] == "toolu_1"
+    assert result["is_error"] is True
+    assert "bash_code_execction" in result["content"] and "bash_code_execution" in result["content"]
+
+
+def test_continuation_replays_the_whole_transcript_after_a_typo_then_a_pause():
+    # typo -> corrected, then the tool loop pauses -> the next call must carry
+    # the typo turn AND its error result AND the paused segment, in order.
+    client = _fake_client([_msg("pause_turn", "partial"), _msg("end_turn", "done")])
+    chain = _continue_until_done(client, _KWARGS, [_typo_msg()])
+
+    assert len(chain) == 3 and chain[-1].stop_reason == "end_turn"
+    roles = [m["role"] for m in _sent_messages(client, 1)]
+    assert roles == ["user", "assistant", "user", "assistant"]
+
+
+def test_tool_use_stop_with_no_tool_call_block_is_not_resumed():
+    odd = SimpleNamespace(stop_reason="tool_use", content=[SimpleNamespace(type="text", text="?")],
+                          usage=None)
+    client = _fake_client([])
+    assert _continue_until_done(client, _KWARGS, [odd]) == [odd]
+    client.beta.messages.stream.assert_not_called()
+
+
+def test_repeated_typos_hit_the_continuation_cap_and_fail_specifically():
+    client = _fake_client([_typo_msg(tool_id=f"toolu_{i}")
+                           for i in range(anthropic_client._MAX_CONTINUATIONS)])
+    chain = _continue_until_done(client, _KWARGS, [_typo_msg()])
+    assert chain[-1].stop_reason == "tool_use"
+    with pytest.raises(RuntimeError, match="misspelled"):
+        anthropic_client._response_from_chain(chain)
+
+
+def test_collect_batch_results_resumes_a_batch_item_that_stopped_on_a_typo():
+    batch_result = SimpleNamespace(custom_id="sha1",
+                                   result=SimpleNamespace(type="succeeded", message=_typo_msg()))
+    requests = [BatchRequest("sha1", "prompt text", "claude-opus-4-8")]
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = _fake_client([_msg("end_turn", "finished")])
+        client.beta.messages.batches.results.return_value = [batch_result]
+        mock_anthropic.return_value = client
+        out = collect_batch_results("batch_1", requests, {"sha1": "file_123"})
+    assert isinstance(out["sha1"], anthropic_client.ExtractResponse)
+    assert out["sha1"].text == "finished"
+    assert client.beta.messages.stream.call_count == 1
