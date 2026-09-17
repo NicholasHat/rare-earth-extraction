@@ -28,7 +28,7 @@ from extraction.runner import ExtractionResult
 from extraction.staging import BatchJob, PaperRef, StagedPaper
 from ingestion import dedup, doi as doi_mod, pdf_inspect, upload
 from validation import schema
-from validation.report import Severity
+from validation.report import ReviewTier, Severity, review_tier
 
 st.set_page_config(page_title="REE Extraction Dashboard", layout="wide")
 
@@ -60,6 +60,16 @@ def _format_usage(result: ExtractionResult) -> str:
         f"{total_in:,} input tokens ({cached_pct} served from cache) · "
         f"{result.output_tokens:,} output tokens"
     )
+
+
+def _tier_for(staged: StagedPaper) -> ReviewTier:
+    """How much attention this staged paper needs (validation.report.review_tier).
+    'Anchor' = the deterministic pre-pass verified marker counts for at least
+    one figure page; 'raster' from the upload triage or the pre-pass's own
+    per-page verdict, whichever noticed."""
+    result = staged.result
+    is_raster = bool(staged.paper.meta.get("is_raster_figure")) or "(raster images)" in result.curve_analysis
+    return review_tier(result.qa_report.verdict, bool(result.deterministic_counts), is_raster)
 
 
 def render_qa(report) -> None:
@@ -356,11 +366,18 @@ def render_review_queue() -> None:
     sha = st.selectbox(
         "Paper to review",
         list(pending),
-        format_func=lambda s: f"{pending[s].paper.filename} ({len(pending[s].result.df)} rows)",
+        format_func=lambda s: (
+            f"{_tier_for(pending[s]).icon} {pending[s].paper.filename} "
+            f"({len(pending[s].result.df)} rows · {_tier_for(pending[s]).label})"
+        ),
     )
     staged = pending[sha]
     paper, result = staged.paper, staged.result
 
+    tier = _tier_for(staged)
+    {"Fast track": st.success, "Standard": st.info, "Full review": st.error}[tier.label](
+        f"{tier.icon} **{tier.label}** — {tier.reason}"
+    )
     render_qa(result.qa_report)
     st.caption(_format_usage(result))
 

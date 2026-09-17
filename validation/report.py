@@ -83,3 +83,38 @@ class QAReport:
             report.add(item["check"], Severity(item["severity"]), item["message"],
                        rows=item.get("rows", ()))
         return report
+
+
+# --------------------------------------------------------------------------- #
+# Review tier — how much human attention a staged extraction needs.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ReviewTier:
+    label: str      # "Fast track" | "Standard" | "Full review"
+    icon: str
+    reason: str
+
+
+def review_tier(verdict: Severity, has_anchor: bool, is_raster: bool) -> ReviewTier:
+    """Review effort proportional to risk, from the three signals the pipeline
+    already has: the QA verdict, whether the deterministic pre-pass produced an
+    authoritative anchor (machine-verified marker counts and coordinates for
+    the figure — only vector figures can), and whether the figures are raster
+    (no ground truth at all; every point is the model's visual read).
+
+    - Fast track: anchored vector figure and QA green. The counts and
+      coordinates were verified without the model; check the metadata
+      columns against the methods section and approve.
+    - Full review: raster, or any red flag. Nothing here is machine-verified.
+    - Standard: everything else (an anchored figure with warnings, or an
+      un-anchored vector figure without reds).
+    """
+    if verdict is Severity.RED:
+        return ReviewTier("Full review", "🔴", "red QA flags gate the merge")
+    if is_raster:
+        return ReviewTier("Full review", "🔴", "raster figures — no deterministic anchor; every point is a visual read")
+    if has_anchor and verdict is Severity.GREEN:
+        return ReviewTier("Fast track", "🟢", "vector figure with a verified marker-count anchor and no QA flags — check the metadata columns, then approve")
+    if has_anchor:
+        return ReviewTier("Standard", "🟡", "anchored vector figure with QA warnings — resolve the flagged rows, check metadata")
+    return ReviewTier("Standard", "🟡", "no deterministic anchor for this figure (multi-panel or unverified) — spot-check the curves, check metadata")
