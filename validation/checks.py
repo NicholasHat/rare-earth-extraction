@@ -24,6 +24,7 @@ from .schema import ELEMENT_COLUMN
 SPARSE_MIN_ROWS = 8          # a curve-type figure should yield >= this many points/element
 PH_TOL = 0.3                 # text-endpoint x-match tolerance on pH
 PCT_TOL = 10.0               # text-endpoint y-mismatch tolerance on %-type metrics
+CONC_TOL_RATIO = 2.0         # text-endpoint x-match tolerance on concentration (a ratio: sweeps are log-spaced)
 MONOTONICITY_NOISE = 5.0     # %E reversal smaller than this is treated as noise
 
 # Map a text-endpoint y_metric / x_basis to the schema column it lives in.
@@ -284,25 +285,44 @@ def _text_endpoint_cross_check(
 
         x_dist = (xs - float(x_val)).abs()
         nearest_x = xs.loc[x_dist.idxmin()]
-        if x_dist.min() > PH_TOL and x_col == "pH":
-            # No digitized point near the stated x at all — the curve may not
-            # reach the paper's stated endpoint.
-            report.add(
-                "text_endpoint_cross_check",
-                Severity.RED,
-                f"Paper states {y_col} {y_val} at {x_col} {x_val} for "
-                f"'{element}', but no digitized point is within {PH_TOL} of "
-                f"{x_col}={x_val} (nearest is {nearest_x:g}). Possible truncated curve.",
-            )
-            continue
+        if x_col == "pH":
+            if x_dist.min() > PH_TOL:
+                # No digitized point near the stated pH at all — the curve
+                # may not reach the paper's stated endpoint.
+                report.add(
+                    "text_endpoint_cross_check",
+                    Severity.RED,
+                    f"Paper states {y_col} {y_val} at {x_col} {x_val} for "
+                    f"'{element}', but no digitized point is within {PH_TOL} of "
+                    f"{x_col}={x_val} (nearest is {nearest_x:g}). Possible truncated curve.",
+                )
+                continue
+            candidates = x_dist <= PH_TOL
+        else:
+            if _ratio(nearest_x, float(x_val)) > CONC_TOL_RATIO:
+                # Nothing within a factor of CONC_TOL_RATIO of the stated
+                # concentration: comparing y against the nearest row would
+                # compare against the wrong point. The usual cause is the
+                # endpoint captured in M while the rows are in mM, which is
+                # unverifiable here rather than a digitization error — so
+                # this is a warning for the reviewer, not a merge gate.
+                report.add(
+                    "text_endpoint_cross_check",
+                    Severity.AMBER,
+                    f"Paper states {y_col} {y_val} at {x_col} {x_val} for "
+                    f"'{element}', but no digitized point is within a factor of "
+                    f"{CONC_TOL_RATIO:g} of {x_col}={x_val} (nearest is {nearest_x:g}). "
+                    f"Endpoint may be in different units (e.g. M vs mM) or the sweep "
+                    f"may be truncated — value not compared.",
+                )
+                continue
+            candidates = x_dist == x_dist.min()
 
         # Several rows can legitimately share the same (or nearly the same) x —
         # e.g. a paper's separate concentration-sweep experiment holds pH fixed
         # while %E varies with concentration, so "nearest x" alone can land on
-        # an unrelated point from a different experiment. Among every row
-        # within tolerance of the stated x, the one whose y best matches the
-        # stated y is the real match.
-        candidates = x_dist <= (PH_TOL if x_col == "pH" else x_dist.min())
+        # an unrelated point from a different experiment. Among every candidate
+        # row, the one whose y best matches the stated y is the real match.
         best_idx = (ys[candidates] - float(y_val)).abs().idxmin()
         y_near = ys.loc[best_idx]
         if abs(y_near - float(y_val)) > PCT_TOL:
@@ -313,3 +333,12 @@ def _text_endpoint_cross_check(
                 f"'{element}', but the digitized value there is {y_near:g} "
                 f"(off by > {PCT_TOL}). Possible calibration drift or under-extraction.",
             )
+
+
+def _ratio(a: float, b: float) -> float:
+    """How far apart two positive magnitudes are, as a ratio >= 1 (inf if signs differ or one is zero)."""
+    if a == b:
+        return 1.0
+    if a <= 0 or b <= 0:
+        return math.inf
+    return max(a / b, b / a)

@@ -134,3 +134,46 @@ def test_text_endpoint_cross_check_still_flags_a_real_mismatch():
     ]
     report = checks.run(_df(_two_experiment_rows()), endpoints, figure_is_curve=True)
     assert any(f.check == "text_endpoint_cross_check" for f in report.reds)
+
+
+def _conc_endpoint(x_value, y_value, element="Nd"):
+    return {"element": element, "x_value": x_value, "x_basis": "extractant_conc_mM",
+            "y_value": y_value, "y_metric": "Extract%"}
+
+
+def test_text_endpoint_conc_far_from_any_row_is_amber_not_red():
+    # The paper says "0.05 to 1 M" and the model captured the endpoint as
+    # x=1.0 but labelled it mM. The rows run 50..1000 mM, so nothing is within
+    # a factor of 2 of 1.0 — comparing against the nearest row (50 mM, 0.24%)
+    # would be comparing against the wrong point. Warn, don't gate.
+    report = checks.run(_df(_two_experiment_rows()), [_conc_endpoint(1.0, 98.76)],
+                        figure_is_curve=True)
+    flags = [f for f in report.flags if f.check == "text_endpoint_cross_check"]
+    assert len(flags) == 1
+    assert flags[0].severity is Severity.AMBER
+    assert "units" in flags[0].message
+    assert not report.reds
+
+
+def test_text_endpoint_conc_exact_row_still_flags_a_real_mismatch():
+    # 1000 mM row reads 26.92%; a claimed 98.76% there is a genuine mismatch.
+    report = checks.run(_df(_two_experiment_rows()), [_conc_endpoint(1000.0, 98.76)],
+                        figure_is_curve=True)
+    assert any(f.check == "text_endpoint_cross_check" for f in report.reds)
+
+
+def test_text_endpoint_conc_exact_row_match_passes():
+    report = checks.run(_df(_two_experiment_rows()), [_conc_endpoint(1000.0, 26.5)],
+                        figure_is_curve=True)
+    assert not any(f.check == "text_endpoint_cross_check" for f in report.flags)
+
+
+def test_text_endpoint_ph_beyond_curve_is_still_red():
+    # pH branch is unchanged: a stated pH the digitized curve never reaches is
+    # a truncated-curve RED, not a units warning.
+    rows = _good_curve("Nd", n=8)  # pH 1.0 .. 3.1
+    endpoints = [{"element": "Nd", "x_value": 5.0, "x_basis": "pH",
+                  "y_value": 99.0, "y_metric": "Extract%"}]
+    report = checks.run(_df(rows), endpoints, figure_is_curve=True)
+    reds = [f for f in report.reds if f.check == "text_endpoint_cross_check"]
+    assert reds and "truncated" in reds[0].message
