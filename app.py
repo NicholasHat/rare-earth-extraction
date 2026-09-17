@@ -119,7 +119,13 @@ def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
             except Exception as e:  # API/auth/etc. — record and keep going
                 errors.append((p.paper.filename, f"Extraction failed: {e}"))
                 continue
-        pending[p.paper.sha] = staging.stage(p.paper, figure_is_curve, result)
+            # Persist before touching Streamlit again. Closing the status box
+            # (or any st.* call) raises Streamlit's stop signal if the browser
+            # session that started this run has since been replaced — a tab
+            # reload, a sleep/wake reconnect, a page switch — and a result
+            # that only exists in this thread dies with it. On disk, it is
+            # picked up by the review queue on the next page load.
+            staging.stage(p.paper, figure_is_curve, result)
     n_ok = len(selected) - len(errors)
     if n_ok:
         st.success(f"Extracted {n_ok}/{len(selected)} paper(s) — ready for review below.")
@@ -413,7 +419,7 @@ def render_review_queue() -> None:
             except Exception as e:
                 st.error(f"Re-extraction failed (previous staged result kept): {e}")
                 st.stop()
-        pending[sha] = staging.stage(paper, staged.figure_is_curve, new_result)
+            staging.stage(paper, staged.figure_is_curve, new_result)  # before the spinner closes — see _run_batch
         st.rerun()
 
 
