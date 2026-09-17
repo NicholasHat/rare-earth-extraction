@@ -177,3 +177,125 @@ def test_text_endpoint_ph_beyond_curve_is_still_red():
     report = checks.run(_df(rows), endpoints, figure_is_curve=True)
     reds = [f for f in report.reds if f.check == "text_endpoint_cross_check"]
     assert reds and "truncated" in reds[0].message
+
+
+# --------------------------------------------------------------------------- #
+# off_curve: points far off the straight line (in log D) through the majority
+# of their own curve — in-plot text digitised as markers, misassigned markers.
+# --------------------------------------------------------------------------- #
+def _logistic_curve(element="Lu", extractant="EHEHPA", conc=1000.0, xs=None, slope=3.0, x_half=1.5):
+    """A clean cation-exchange curve: log D = slope * (pH - pH½), i.e. %E logistic in pH."""
+    xs = xs if xs is not None else [0.6 + 0.15 * i for i in range(12)]
+    return [
+        {EL: element, "Extractant": extractant, "Extractant Conc. (mM)": conc, "pH": x,
+         "Extract%": 100.0 / (1.0 + 10 ** (-slope * (x - x_half)))}
+        for x in xs
+    ]
+
+
+def _off_curve_rows(report):
+    import re
+    rows = []
+    for f in report.flags:
+        if f.check == "off_curve":
+            rows += [int(r) for r in re.search(r"row\(s\) ([\d, ]+)", f.message).group(1).split(",")]
+    return sorted(rows)
+
+
+def test_off_curve_clean_logistic_curve_is_silent():
+    report = checks.run(_df(_logistic_curve()), [], figure_is_curve=True)
+    assert not any(f.check == "off_curve" for f in report.flags)
+
+
+def test_off_curve_names_a_panel_title_run_including_adjacent_and_leading_points():
+    # Quinn 2015 shape: a low-lying curve plus the panel title digitised as
+    # three adjacent ~84 %E markers, and one more at the very start of the
+    # series — the cases a neighbour-based test cannot see.
+    rows = _logistic_curve(xs=[-0.70, -0.66, -0.61, -0.21, -0.05], x_half=0.0, slope=2.5)
+    labels = [dict(rows[0], pH=x, **{"Extract%": e}) for x, e in
+              [(-0.77, 84.2), (-0.55, 85.4), (-0.45, 84.2), (-0.30, 82.6)]]
+    table = labels[:1] + rows[:3] + labels[1:] + rows[3:]
+    report = checks.run(_df(table), [], figure_is_curve=True)
+    assert _off_curve_rows(report) == [1, 5, 6, 7]
+    assert all(f.severity is Severity.AMBER for f in report.flags if f.check == "off_curve")
+
+
+def test_off_curve_flags_a_neighbouring_series_marker_assigned_to_this_one():
+    rows = _logistic_curve()
+    rows[6]["Extract%"] = 97.0   # a marker from a stronger extractant's curve, mid-series
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert _off_curve_rows(report) == [7]
+
+
+def test_off_curve_is_silent_when_no_line_explains_the_curve():
+    # Non-linearity is not evidence of artifacts: when no line runs through
+    # half the band, the check says nothing rather than guess.
+    import numpy as np
+    x = np.linspace(0.0, 2 * np.pi, 12)
+    pct = 100.0 / (1.0 + 10.0 ** (-2.5 * np.sin(x)))   # log D swings ±2.5, nowhere straight
+    assert checks._off_curve_points(x, pct) == ([], 0)
+
+
+def test_off_curve_tolerates_a_saturation_plateau_and_low_end_scatter():
+    # Swain & Otu shape: a rising limb, then 98–99 % for two pH units, plus a
+    # few-percent wobble at the low end. All real; none of it is off-curve.
+    pct = [5.0, 5.6, 3.4, 4.8, 7.0, 8.4, 9.8, 12.0, 15.2, 26.8, 61.0, 65.6,
+           98.1, 96.9, 98.9, 99.3, 99.3]
+    xs = [0.87, 1.01, 1.17, 1.24, 1.34, 1.40, 1.47, 1.51, 1.56, 1.76, 1.99, 2.04,
+          2.22, 2.34, 2.48, 2.89, 4.05]
+    rows = [{EL: "Eu", "pH": x, "Extract%": e} for x, e in zip(xs, pct)]
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert not any(f.check == "off_curve" for f in report.flags)
+
+
+def test_off_curve_needs_at_least_five_points():
+    rows = _logistic_curve(xs=[1.0, 1.2, 1.4, 1.6])
+    rows[1]["Extract%"] = 95.0
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert not any(f.check == "off_curve" for f in report.flags)
+
+
+def test_curves_are_keyed_by_extractant_too():
+    # Same element, two extractants, both clean but offset: pooled by element
+    # alone they interleave into a zig-zag; keyed by extractant they are two
+    # clean curves and neither monotonicity nor off_curve has anything to say.
+    rows = _logistic_curve(extractant="EHEHPA", x_half=1.2) + _logistic_curve(extractant="Cyanex 272", x_half=2.2)
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert not any(f.check in ("monotonicity", "off_curve") for f in report.flags)
+
+
+def test_monotonicity_message_names_the_rows_where_the_curve_falls():
+    rows = _logistic_curve()
+    rows[3]["Extract%"] = 60.0
+    rows[8]["Extract%"] = 20.0
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    (flag,) = [f for f in report.flags if f.check == "monotonicity"]
+    assert "row(s) 5, 9" in flag.message and "Lu (EHEHPA, 1000 mM)" in flag.message
+
+
+def test_off_curve_ignores_censored_points_at_the_axis_frame():
+    # A weak extractant's curve digitised from 0 % up: the leading 0.0 %E
+    # points are censored (no log D), not evidence of anything.
+    rows = _logistic_curve(x_half=2.4)
+    for r in rows[:4]:
+        r["Extract%"] = 0.0
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert not any(f.check == "off_curve" for f in report.flags)
+
+
+def test_off_curve_flag_names_its_rows_structurally():
+    rows = _logistic_curve()
+    rows[6]["Extract%"] = 97.0
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    (flag,) = [f for f in report.flags if f.check == "off_curve"]
+    assert flag.rows == (7,) and report.flagged_rows == [7]
+
+
+def test_duplicate_rows_names_same_curve_repeats_but_not_cross_series_copies():
+    rows = _logistic_curve()
+    rows.append(dict(rows[4]))                                  # digitising loop: exact repeat, same curve
+    rows.append(dict(rows[2], Extractant="Cyanex 272"))         # same triple under another extractant
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    (flag,) = [f for f in report.flags if f.check == "duplicate_rows"]
+    assert flag.rows == (13,)          # only the same-curve repeat is droppable
+    assert "4 row(s)" in flag.message  # both pairs are still reported

@@ -8,12 +8,14 @@ Each known failure mode maps to a check here:
   - axis calibration drift                              -> text_endpoint_cross_check / axis_bounds (RED)
   - OCR-garbled numeric tables                          -> schema_conformance (RED)
   - monochrome series merged/dropped                    -> row_count_sanity + duplicate_rows + monotonicity
+  - in-plot text / another series' markers digitised in -> off_curve (AMBER)
   - vocabulary drift                                    -> vocabulary (AMBER)
 """
 from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
 from . import vocab
@@ -26,6 +28,12 @@ PH_TOL = 0.3                 # text-endpoint x-match tolerance on pH
 PCT_TOL = 10.0               # text-endpoint y-mismatch tolerance on %-type metrics
 CONC_TOL_RATIO = 2.0         # text-endpoint x-match tolerance on concentration (a ratio: sweeps are log-spaced)
 MONOTONICITY_NOISE = 5.0     # %E reversal smaller than this is treated as noise
+OFF_CURVE_FIT_PCT = (1.0, 97.0)  # only %E in this band carries slope information in log D; outside it a
+                                 # digitised curve is a saturation plateau (or censored at the frame)
+OFF_CURVE_INLIER_LOGD = 0.5      # |log D residual| for a point to count as ON the fitted line
+OFF_CURVE_FLAG_LOGD = 0.8        # flag needs BOTH: this far off in log D (factor ~6 in D) ...
+OFF_CURVE_FLAG_PCT = 25.0        # ... and this far off in %E (so a 1 % vs 3 % scatter never trips it)
+OFF_CURVE_MIN_INLIER_FRAC = 0.5  # a line must explain at least this share of the band (and >= 4 points)
 
 # Map a text-endpoint y_metric / x_basis to the schema column it lives in.
 _Y_METRIC_TO_COL = {
@@ -71,6 +79,7 @@ def run(
     _row_count_sanity(df, figure_is_curve, report)
     _axis_bounds(df, report)
     _monotonicity(df, report)
+    _off_curve(df, report)
     _duplicate_rows(df, report)
     _vocabulary(df, report)
     _text_endpoint_cross_check(df, text_endpoints, report)
@@ -111,6 +120,7 @@ def _element_groups(df: pd.DataFrame):
 # one (e.g. a pH sweep at fixed concentration). Grouping by element alone
 # pools both together, corrupting any check of one curve's shape.
 _CURVE_KEY_COLUMNS = [
+    "Extractant",
     "Extractant Conc. (mM)",
     "Extract Temperature (oC)",
     "Acid Solution conc. (M)",
@@ -129,8 +139,14 @@ def _curve_groups(df: pd.DataFrame):
     grouped = df.copy()
     grouped[ELEMENT_COLUMN] = grouped[ELEMENT_COLUMN].fillna("(unspecified)")
     for key, sub in grouped.groupby(key_cols, dropna=False):
-        label = key[0] if isinstance(key, tuple) else key
-        yield str(label), sub
+        key = key if isinstance(key, tuple) else (key,)
+        # "Lu" alone is ambiguous once a paper has several extractants for the
+        # same element; name the curve the way the reviewer would.
+        conds = [f"{v:g} mM" if c == "Extractant Conc. (mM)" else str(v)
+                 for c, v in zip(key_cols[1:], key[1:])
+                 if c in ("Extractant", "Extractant Conc. (mM)") and pd.notna(v)]
+        label = f"{key[0]} ({', '.join(conds)})" if conds else str(key[0])
+        yield label, sub
 
 
 def _row_count_sanity(df: pd.DataFrame, figure_is_curve: bool, report: QAReport) -> None:
@@ -205,25 +221,117 @@ def _axis_bounds(df: pd.DataFrame, report: QAReport) -> None:
             )
 
 
+def _curve_points(df: pd.DataFrame, sub: pd.DataFrame) -> pd.DataFrame:
+    """A curve's numeric (pH, Extract%) points sorted by pH, with a `row`
+    column giving each point's 1-based position in `df` — the row number the
+    reviewer sees in the review editor and in the exported CSV."""
+    s = sub[["pH", "Extract%"]].apply(pd.to_numeric, errors="coerce").dropna()
+    s["row"] = df.index.get_indexer(s.index) + 1
+    return s.sort_values("pH")
+
+
+def _rows(rows) -> str:
+    rows = [int(r) for r in rows]
+    shown = ", ".join(str(r) for r in rows[:8])
+    return shown + (f", … ({len(rows)} total)" if len(rows) > 8 else "")
+
+
 def _monotonicity(df: pd.DataFrame, report: QAReport) -> None:
     if "pH" not in df.columns or "Extract%" not in df.columns:
         return
     for label, sub in _curve_groups(df):
-        s = sub[["pH", "Extract%"]].apply(pd.to_numeric, errors="coerce").dropna()
+        s = _curve_points(df, sub)
         if len(s) < 4:
             continue
-        s = s.sort_values("pH")
-        deltas = s["Extract%"].diff().dropna()
-        ups = (deltas > MONOTONICITY_NOISE).sum()
-        downs = (deltas < -MONOTONICITY_NOISE).sum()
+        deltas = s["Extract%"].diff()
+        ups = int((deltas > MONOTONICITY_NOISE).sum())
+        downs = int((deltas < -MONOTONICITY_NOISE).sum())
         # Broadly monotonic (or a plateau) means movement is essentially one-way.
         if ups >= 2 and downs >= 2:
             report.add(
                 "monotonicity",
                 Severity.AMBER,
                 f"Element '{label}' %E-vs-pH curve is non-monotonic "
-                f"({ups} rises, {downs} falls beyond noise) — check for misread "
-                "points or two series merged into one.",
+                f"({ups} rises, {downs} falls beyond noise; falls land on row(s) "
+                f"{_rows(s.loc[deltas < -MONOTONICITY_NOISE, 'row'])}) — check for "
+                "misread points or two series merged into one.",
+            )
+
+
+def _log_d(pct: np.ndarray) -> np.ndarray:
+    """%E -> log10 of the distribution ratio (callers keep %E strictly inside 0..100)."""
+    return np.log10(pct / (100.0 - pct))
+
+
+def _off_curve_points(x: np.ndarray, pct: np.ndarray) -> tuple[list[int], int]:
+    """Indices of points far off the straight line that the majority of the
+    curve lies on, plus how many points that line explains (0 => no such line).
+
+    log D is linear in pH for the cation-exchange systems this database
+    covers — that linearity is why papers plot it. So the curve is the line
+    through the most points (every pair proposes one; deterministic, n is tens
+    of points), refined by least squares on its inliers. A point well off that
+    line is not on the curve, whatever its neighbours look like — which is
+    what defeats local tests: a panel title digitised as three adjacent
+    markers, or an artifact sitting right next to a real point.
+
+    Two guards keep this honest on real curves. Only %E inside
+    OFF_CURVE_FIT_PCT takes part: above it a digitised curve is a saturation
+    plateau (98 % for two pH units), which is not a line in log D and would
+    otherwise out-vote the rising part. And a flag needs the point to be far
+    off in %E as well as in log D, because near the ends of the band a small
+    %E scatter is a large log D one. Nothing is reported for a curve no line
+    explains (OFF_CURVE_MIN_INLIER_FRAC): non-linearity is not evidence of
+    artifacts."""
+    lo, hi = OFF_CURVE_FIT_PCT
+    band = np.flatnonzero((pct >= lo) & (pct <= hi))
+    if len(band) < 5:
+        return [], 0
+    xb, yb = x[band], _log_d(pct[band])
+    n = len(band)
+    best_inliers: np.ndarray | None = None
+    best_score = (0, 0.0)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if xb[j] == xb[i]:
+                continue
+            slope = (yb[j] - yb[i]) / (xb[j] - xb[i])
+            resid = np.abs(yb - (yb[i] + slope * (xb - xb[i])))
+            inliers = resid <= OFF_CURVE_INLIER_LOGD
+            score = (int(inliers.sum()), -float(resid[inliers].sum()))
+            if score > best_score:
+                best_score, best_inliers = score, inliers
+    if best_inliers is None or best_inliers.sum() < max(4, OFF_CURVE_MIN_INLIER_FRAC * n):
+        return [], 0
+    slope, intercept = np.polyfit(xb[best_inliers], yb[best_inliers], 1)
+    line_logd = intercept + slope * xb
+    line_pct = 100.0 / (1.0 + 10.0 ** (-line_logd))
+    off = (np.abs(yb - line_logd) > OFF_CURVE_FLAG_LOGD) & (np.abs(pct[band] - line_pct) > OFF_CURVE_FLAG_PCT)
+    return [int(i) for i in band[off]], int(best_inliers.sum())
+
+
+def _off_curve(df: pd.DataFrame, report: QAReport) -> None:
+    """Points that sit far off their own curve. Extraction curves don't do that;
+    in-plot text does — a panel title or annotation digitised as a marker lands
+    at whatever %E its pixels sit at (seen live: Quinn 2015's panel titles at
+    log D ≈ 0.7 became runs of 83–85 %E points in the Lu series, three of them
+    side by side). So does a neighbouring series' marker assigned to this one."""
+    if "pH" not in df.columns or "Extract%" not in df.columns:
+        return
+    for label, sub in _curve_groups(df):
+        s = _curve_points(df, sub)
+        off, n_on = _off_curve_points(s["pH"].to_numpy(float), s["Extract%"].to_numpy(float))
+        if off:
+            rows = s["row"].to_numpy()[off]
+            report.add(
+                "off_curve",
+                Severity.AMBER,
+                f"{label}: {len(rows)} point(s) at row(s) {_rows(rows)} lie > "
+                f"{OFF_CURVE_FLAG_LOGD:g} decades in log D off the straight line through "
+                f"the other {n_on} points of this curve — typical of in-plot text "
+                "(panel titles, annotations) or another series' markers digitised into "
+                "this one. Delete unless the figure really shows them.",
+                rows=rows,
             )
 
 
@@ -233,13 +341,25 @@ def _duplicate_rows(df: pd.DataFrame, report: QAReport) -> None:
         return
     dups = df.duplicated(subset=key, keep=False) & df[key].notna().all(axis=1)
     n = int(dups.sum())
-    if n > 0:
-        report.add(
-            "duplicate_rows",
-            Severity.AMBER,
-            f"{n} row(s) share an identical (element, pH, %E) triple — possible "
-            "digitizing loop or copy error.",
-        )
+    if n == 0:
+        return
+    # A repeat of an earlier row *within the same curve* (same element and
+    # experimental conditions) is a digitising loop: the later copies add
+    # nothing and are safe to drop by row. The same triple under two different
+    # extractants is a point assigned to two series — one copy is real and
+    # only the reviewer can say which, so those are reported but not named.
+    curve_key = [ELEMENT_COLUMN] + [c for c in _CURVE_KEY_COLUMNS if c in df.columns]
+    same_curve = df.duplicated(subset=curve_key + ["pH", "Extract%"], keep="first") & dups
+    repeat_rows = [int(i) + 1 for i in np.flatnonzero(same_curve.to_numpy())]
+    report.add(
+        "duplicate_rows",
+        Severity.AMBER,
+        f"{n} row(s) share an identical (element, pH, %E) triple — possible "
+        "digitizing loop or copy error."
+        + (f" {len(repeat_rows)} of them repeat an earlier row of the same curve "
+           f"(row(s) {_rows(repeat_rows)}) and can be dropped." if repeat_rows else ""),
+        rows=repeat_rows,
+    )
 
 
 def _vocabulary(df: pd.DataFrame, report: QAReport) -> None:
