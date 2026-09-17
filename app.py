@@ -37,10 +37,10 @@ connection.init_db()
 
 
 def _pending() -> dict[str, StagedPaper]:
-    """The review queue, restored from disk on the first run of a session."""
-    if "pending" not in st.session_state:
-        st.session_state["pending"] = staging.load_all()
-    return st.session_state["pending"]
+    """The review queue, read from disk on every script run. Staging is the one
+    source of truth: a result can be staged by a run whose browser session is
+    gone (see _run_batch), so a per-session cache would never show it."""
+    return staging.load_all()
 
 
 def _first_value(df: pd.DataFrame, col: str):
@@ -104,7 +104,6 @@ def _preview(uploaded_file, conn) -> _Preview:
 
 
 def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
-    pending = _pending()
     errors = []
     for i, p in enumerate(selected, start=1):
         with st.status(f"[{i}/{len(selected)}] Extracting {p.paper.filename}…", expanded=False):
@@ -173,7 +172,6 @@ def _collect_batch_job(job: BatchJob) -> None:
     Caller must hold the collection lock (job.begin_collection()) — see
     render_batch_jobs.
     """
-    pending = _pending()
     try:
         results = runner.collect_batch(job.batch_id, job.items, job.file_ids)
     except Exception as e:
@@ -187,7 +185,7 @@ def _collect_batch_job(job: BatchJob) -> None:
         if isinstance(result, Exception):
             errors[sha] = str(result)
             continue
-        pending[sha] = staging.stage(job.papers[sha], job.items[sha].figure_is_curve, result)
+        staging.stage(job.papers[sha], job.items[sha].figure_is_curve, result)
         n_ok += 1
 
     if errors:
@@ -345,7 +343,6 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
             "its rows stay in the DB but are no longer current."
         )
     st.success(merged_msg)
-    _pending().pop(sha, None)
     staging.discard(sha)
 
 
@@ -394,7 +391,6 @@ def render_review_queue() -> None:
         st.rerun()
 
     if col_b.button("🗑️ Reject", key=f"reject_{sha}"):
-        pending.pop(sha, None)
         staging.discard(sha)
         st.info(f"{paper.filename} rejected and discarded (nothing written to the master DB).")
         st.rerun()
