@@ -3,7 +3,7 @@ streamlit>=1.50        # width='stretch' on st.dataframe / st.data_editor
 anthropic>=0.69
 pandas>=2.2
 openpyxl>=3.1          # XLSX export/read for staging artifacts
-pypdf>=5.1             # PDF metadata / DOI parsing / raster-vs-vector inspection
+pypdf>=5.1             # DOI parsing from PDF text/metadata (ingestion/doi.py)
 python-dotenv>=1.0     # load .env (REQUIRE_PASSWORD, WRITE_PASSWORD, ANTHROPIC_API_KEY)
 pdfplumber>=0.11       # deterministic curve extractor — vector geometry (extraction/curve_extractor)
 numpy>=2.0             # curve extractor — clustering / least-squares fit
