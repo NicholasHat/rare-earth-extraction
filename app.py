@@ -479,6 +479,26 @@ def main() -> None:
     )
 
     selected = [p for p, inc in zip(previews, edited_table["Include"]) if inc]
+    # A second click on the run/submit button before the first has finished
+    # (or a re-upload of a paper still in the queue) must not pay for the
+    # same extraction twice: skip anything already in an unfinished batch job
+    # or already staged for review. Both live on disk, so this holds across
+    # sessions and restarts.
+    in_flight = {sha for job in staging.load_batch_jobs().values() for sha in job.items}
+    awaiting_review = set(staging.load_all())
+    busy = [p for p in selected if p.paper.sha in in_flight | awaiting_review]
+    if busy:
+        st.warning(
+            "Skipping "
+            + ", ".join(
+                f"**{p.paper.filename}** "
+                f"({'in a batch job still running' if p.paper.sha in in_flight else 'awaiting review below'})"
+                for p in busy
+            )
+            + " — approve or reject it first to extract it again."
+        )
+        busy_shas = {p.paper.sha for p in busy}
+        selected = [p for p in selected if p.paper.sha not in busy_shas]
     dup_selected = [p for p in selected if p.status != "new"]
     if dup_selected:
         st.warning(
