@@ -4,7 +4,24 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v9 — log-log concentration sweeps are data, not always derived (current pinned default)
+## extraction_v10 — in-plot text is not data; tangled raster series are omitted, not guessed (current pinned default)
+- Found on Quinn et al. 2015 (raster, monochrome): every Fig. 2 panel prints its
+  title inside the frame at log D ≈ 0.7, and the model digitised those letters
+  as the filled-square (Lu) series — thirteen rows at 83–85 %E in series whose
+  real points sit at 1–5 %E. Step 5 now treats panel titles, annotations and any
+  other in-plot lettering as regions to mask before digitising, exactly like the
+  legend, with the monochrome-raster failure mode spelled out.
+- Step 5 also stops the model apportioning a cluster of three or more
+  overlapping monochrome series by guesswork (Quinn's Er/Y/Ho/Dy/Tb tangle
+  produced inconsistent, partly invented rows): digitise the separable series,
+  omit the rest.
+- Step 6 adds the check the QA layer now also runs (`validation/checks.py`
+  `off_curve`): fit each series as a straight line in log D vs pH and drop
+  points an order of magnitude off it — before text end-point validation, so an
+  artifact can't be "validated" by coincidence.
+- Three matching "Common pitfalls" rows. Everything else is unchanged from v9.
+
+## extraction_v9 — log-log concentration sweeps are data, not always derived
 - Step 1's y-axis classification no longer skips every `log D` vs
   `log[extractant]` plot as a derived re-plot. Found on Swain & Otu 2011: its
   Fig. 5 holds concentration sweeps at equilibrium pH 1.25 and 2.50 that appear
