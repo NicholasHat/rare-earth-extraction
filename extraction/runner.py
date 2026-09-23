@@ -124,6 +124,22 @@ def qa_feedback_block(report: QAReport, row_count: int) -> str:
     return "\n".join(lines)
 
 
+def must_use_batch(paper_meta: dict) -> bool:
+    """Whether a paper is only ever extracted through the Batches API.
+
+    Raster-figure papers are. Their code-execution loop runs far longer than a
+    vector paper's (Quinn et al. 2015 was still digitizing after 51 iterations
+    under extraction_v9), and every iteration re-reads the whole growing
+    transcript, so cost grows faster than the loop does. The synchronous path
+    makes that worse twice over: it pauses every 10 iterations and re-writes
+    the transcript to cache on each continuation, and it gives up after
+    _MAX_CONTINUATIONS — throwing the whole spend away (2026-09-22: ~$7.50 for
+    nothing). Batch requests are half price and get a higher iteration cap.
+    `paper_meta` is ingestion.pdf_inspect.inspect()'s dict.
+    """
+    return bool(paper_meta.get("is_raster_figure"))
+
+
 def extract_paper(
     pdf_bytes: bytes,
     *,
@@ -167,6 +183,7 @@ class BatchItem:
     prompt_version: str
     prompt_sha256: str
     model: str
+    qa_feedback: str | None = None   # set on a batched re-extraction (see submit_batch)
 
 
 def submit_batch(
@@ -175,6 +192,7 @@ def submit_batch(
     figure_is_curve: bool = True,
     prompt_version: str | None = None,
     model: str | None = None,
+    qa_feedback: str | None = None,
 ) -> tuple[str, dict[str, BatchItem], dict[str, str]]:
     """Run the deterministic pre-pass for each paper and submit one Batches API
     job covering all of them.
@@ -183,6 +201,12 @@ def submit_batch(
     content sha256. Returns (batch_id, items_by_custom_id, file_ids) — the
     caller persists all three so the batch can be checked/collected later,
     even across a server restart.
+
+    `qa_feedback` is the previous attempt's QA block (qa_feedback_block) for an
+    on-demand re-extraction, exactly as extract_paper takes it; it applies to
+    every paper in the job, so a re-extraction submits a one-paper job. It is
+    kept on the BatchItem because a paused item is rebuilt from the item when
+    its continuation is sent.
     """
     bundle = prompt_loader.load_prompt(prompt_version)
     model = model or config.EXTRACTION_MODEL
@@ -200,6 +224,7 @@ def submit_batch(
             prompt_version=bundle.version,
             prompt_sha256=bundle.sha256,
             model=model,
+            qa_feedback=qa_feedback,
         )
         requests.append(_batch_request(items[custom_id], bundle.text))
         pdfs[custom_id] = pdf_bytes
@@ -214,6 +239,7 @@ def _batch_request(item: BatchItem, prompt_text: str) -> anthropic_client.BatchR
         prompt_text=prompt_text,
         model=item.model,
         analysis_block=item.analysis_block or None,
+        qa_feedback=item.qa_feedback,
     )
 
 

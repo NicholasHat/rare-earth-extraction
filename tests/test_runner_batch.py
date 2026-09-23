@@ -1,7 +1,10 @@
 """Tests for runner.collect_batch()'s wiring into anthropic_client.collect_batch_results —
 specifically that it reloads each item's pinned prompt by version and threads
 through the already-uploaded file_id, rather than needing the raw PDF again."""
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from extraction import runner
 from extraction.anthropic_client import BatchRequest
@@ -73,3 +76,43 @@ def test_collect_batch_isolates_a_paper_whose_postprocess_raises():
 
     assert isinstance(out["sha_bad"], ValueError)
     assert out["sha_ok"] == "parsed-ok"
+
+
+# --------------------------------------------------------------------------- #
+# Routing: raster papers only ever go through the Batch API
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("meta, expected", [
+    ({"is_raster_figure": 1}, True),
+    ({"is_raster_figure": 0}, False),
+    ({"is_raster_figure": None}, False),   # triage undecided — sync is allowed
+    ({}, False),
+])
+def test_must_use_batch_routes_raster_papers_only(meta, expected):
+    assert runner.must_use_batch(meta) is expected
+
+
+def test_submit_batch_threads_qa_feedback_into_item_and_request():
+    """A batched re-extraction carries the previous attempt's QA block the
+    same way extract_paper's qa_feedback does — on the request now, and on the
+    persisted BatchItem so a paused item's continuation is rebuilt with it."""
+    captured = {}
+
+    def _fake_submit(requests, pdfs):
+        captured["requests"] = requests
+        return SimpleNamespace(batch_id="batch_1", file_ids={"sha1": "file_1"})
+
+    with patch.object(runner.anthropic_client, "submit_batch", side_effect=_fake_submit), \
+         patch.object(runner, "_prepass", return_value=("", [])), \
+         patch.object(runner.prompt_loader, "load_prompt") as mock_load:
+        mock_load.return_value.text = "PROMPT TEXT"
+        mock_load.return_value.version = "extraction_v10"
+        mock_load.return_value.sha256 = "abc"
+        _, items, _ = runner.submit_batch(
+            [("sha1", b"%PDF")], figure_is_curve=True, qa_feedback="## QA FEEDBACK"
+        )
+
+    assert items["sha1"].qa_feedback == "## QA FEEDBACK"
+    assert captured["requests"][0].qa_feedback == "## QA FEEDBACK"
+    # Rebuilding the request from the persisted item (what collect_batch does) keeps it.
+    assert runner._batch_request(items["sha1"], "PROMPT TEXT").qa_feedback == "## QA FEEDBACK"

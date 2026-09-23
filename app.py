@@ -142,13 +142,18 @@ def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
         st.error(f"{filename}: {msg}")
 
 
-def _submit_batch_job(selected: list[_Preview], figure_is_curve: bool) -> None:
-    """Submit selected papers as one Message Batches API job (50% cheaper,
-    asynchronous). Persists a sidecar so the job can be checked/collected
-    later, including across a server restart."""
-    papers = [(p.paper.sha, p.pdf_bytes) for p in selected]
+def _submit_batch_job(
+    papers: list[tuple[PaperRef, bytes]], figure_is_curve: bool, qa_feedback: str | None = None
+) -> None:
+    """Submit papers as one Message Batches API job (50% cheaper, asynchronous).
+    Persists a sidecar so the job can be checked/collected later, including
+    across a server restart. With `qa_feedback` it is a re-extraction: the
+    job's result replaces the paper's staged one when it is collected."""
     try:
-        batch_id, items, file_ids = runner.submit_batch(papers, figure_is_curve=figure_is_curve)
+        batch_id, items, file_ids = runner.submit_batch(
+            [(paper.sha, pdf_bytes) for paper, pdf_bytes in papers],
+            figure_is_curve=figure_is_curve, qa_feedback=qa_feedback,
+        )
     except PromptNotReadyError as e:
         st.error(f"Prompt not ready: {e}")
         return
@@ -159,11 +164,11 @@ def _submit_batch_job(selected: list[_Preview], figure_is_curve: bool) -> None:
         batch_id=batch_id,
         file_ids=file_ids,
         items=items,
-        papers={p.paper.sha: p.paper for p in selected},
+        papers={paper.sha: paper for paper, _ in papers},
     ).save()
     st.success(
-        f"Batch submitted: {len(selected)} paper(s), batch_id={batch_id}. Batches usually "
-        "finish within an hour (up to 24h) — come back to 'Batch API jobs' below and click "
+        f"Batch submitted: {len(papers)} paper(s), batch_id={batch_id}. Batches usually "
+        "finish within an hour (up to 24h) — come back to 'Batch API jobs' and click "
         "'Check status' to retrieve results once it's done."
     )
 
@@ -443,14 +448,24 @@ def render_review_queue() -> None:
 
     # The middle option between "approve anyway" and "throw it away": re-run
     # the extraction with the QA findings injected as feedback, on demand only
-    # (one extra synchronous API call; never automatic — a false-positive flag
-    # shouldn't silently cost money). Replaces this paper's staged result.
+    # (one extra extraction; never automatic — a false-positive flag shouldn't
+    # silently cost money). Replaces this paper's staged result. A raster
+    # paper takes the Batch API route here exactly as on first extraction
+    # (runner.must_use_batch); its result lands when the job is collected, so
+    # a second click meanwhile is refused rather than paid for twice.
+    batch_pending = any(sha in job.items for job in staging.load_batch_jobs().values())
+    if batch_pending:
+        col_c.caption("A batched re-extraction of this paper is in flight — see 'Batch API jobs'.")
     if result.qa_report.flags and col_c.button(
-        "🔁 Re-extract with QA feedback", key=f"reextract_{sha}"
+        "🔁 Re-extract with QA feedback", key=f"reextract_{sha}", disabled=batch_pending
     ):
         if not auth.require_write_access():
             st.stop()
         feedback = runner.qa_feedback_block(result.qa_report, len(result.df))
+        if runner.must_use_batch(paper.meta):
+            _submit_batch_job([(paper, Path(paper.pdf_path).read_bytes())],
+                              staged.figure_is_curve, qa_feedback=feedback)
+            st.stop()  # keep the submission message on screen; the job shows on the next run
         with st.spinner("Re-extracting with the QA findings as feedback — this runs one full synchronous extraction..."):
             try:
                 new_result = runner.extract_paper(
@@ -514,13 +529,16 @@ def main() -> None:
         value=True,
     )
     use_batch_api = st.checkbox(
-        "Use the Batch API instead (50% cheaper token pricing; asynchronous — "
-        "usually done within an hour, up to 24h)",
+        "Use the Batch API for every paper (50% cheaper token pricing; asynchronous — "
+        "usually done within an hour, up to 24h). Raster papers take it regardless.",
         value=False,
         help=(
             "Verified live once (2026-07-29, ~$2.26/paper, accuracy matching the "
             "synchronous baseline). Still worth a 1-2 paper trial before a full "
-            "run after any change to the request shape."
+            "run after any change to the request shape. Raster-figure papers are "
+            "never run synchronously: their much longer digitization loop costs "
+            "several times more that way and can exhaust the sync path's "
+            "continuation cap with nothing to show for the spend."
         ),
     )
 
@@ -553,18 +571,30 @@ def main() -> None:
             "(coexistence), not a duplicate paper."
         )
 
-    button_label = (
-        f"Submit {len(selected)} paper(s) as a batch"
-        if use_batch_api
-        else f"Run extraction on {len(selected)} paper(s)"
-    )
+    # Route: the toggle sends everything to the Batch API; without it, raster
+    # papers still go that way (runner.must_use_batch) and the rest run now.
+    batched, synchronous = [], []
+    for p in selected:
+        (batched if use_batch_api or runner.must_use_batch(p.paper.meta) else synchronous).append(p)
+    if batched and not use_batch_api:
+        st.info(
+            "Raster paper(s) routed to the Batch API: "
+            + ", ".join(f"**{p.paper.filename}**" for p in batched)
+            + " — check 'Batch API jobs' for the result."
+        )
+    button_label = " + ".join(
+        label for label, n in (
+            (f"Run extraction on {len(synchronous)} paper(s)", len(synchronous)),
+            (f"Submit {len(batched)} paper(s) as a batch", len(batched)),
+        ) if n
+    ) or "Run extraction on 0 paper(s)"
     if st.button(button_label, type="primary", disabled=not selected):
         if not auth.require_write_access():
             st.stop()
-        if use_batch_api:
-            _submit_batch_job(selected, figure_is_curve)
-        else:
-            _run_batch(selected, figure_is_curve)
+        if batched:
+            _submit_batch_job([(p.paper, p.pdf_bytes) for p in batched], figure_is_curve)
+        if synchronous:
+            _run_batch(synchronous, figure_is_curve)
 
     render_batch_jobs()
     render_review_queue()

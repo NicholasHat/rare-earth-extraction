@@ -1,6 +1,7 @@
 """Tests for extraction/staging.py — the on-disk review queue and Batch API
 job sidecars that let both survive a Streamlit server restart. Pure file I/O
 against a temporary STAGING_DIR; no Streamlit, no API."""
+import json
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -143,6 +144,20 @@ def test_batch_job_round_trips(_staging_dir):
     assert list(loaded) == ["msgbatch_1"]
     got = loaded["msgbatch_1"]
     assert got == job
+
+
+def test_batch_job_round_trips_a_re_extraction_and_loads_older_sidecars(_staging_dir):
+    """qa_feedback (a batched re-extraction) survives the sidecar; a sidecar
+    written before the field existed still loads, as a first extraction."""
+    job = _job()
+    job.items["a" * 64].qa_feedback = "## QA FEEDBACK"
+    job.save()
+    assert staging.load_batch_jobs()["msgbatch_1"].items["a" * 64].qa_feedback == "## QA FEEDBACK"
+
+    payload = json.loads(job.path.read_text())
+    del payload["items"]["a" * 64]["qa_feedback"]
+    job.path.write_text(json.dumps(payload))
+    assert staging.load_batch_jobs()["msgbatch_1"].items["a" * 64].qa_feedback is None
 
 
 def test_batch_job_delete_and_corrupt_sidecar(_staging_dir):

@@ -258,3 +258,18 @@ def test_collect_batch_results_resumes_a_batch_item_that_stopped_on_a_typo():
     assert isinstance(out["sha1"], anthropic_client.ExtractResponse)
     assert out["sha1"].text == "finished"
     assert client.beta.messages.stream.call_count == 1
+
+
+def test_batch_request_carries_qa_feedback_into_the_user_turn():
+    """A batched re-extraction injects the previous attempt's QA block exactly
+    where the synchronous path does: after the pre-pass block, before the
+    cache-marked instruction, so the cached prefix shape is unchanged."""
+    content = BatchRequest(
+        "sha1", "prompt", "claude-sonnet-5", analysis_block="PREPASS", qa_feedback="FEEDBACK",
+    ).message_kwargs("file_1")["messages"][0]["content"]
+    texts = [b["text"] for b in content if b["type"] == "text"]
+    assert texts[:2] == ["PREPASS", "FEEDBACK"]
+    assert "cache_control" in content[-1] and content[-1]["text"] not in ("PREPASS", "FEEDBACK")
+
+    without = BatchRequest("sha1", "prompt", "claude-sonnet-5").message_kwargs("file_1")
+    assert [b["type"] for b in without["messages"][0]["content"]] == ["document", "container_upload", "text"]

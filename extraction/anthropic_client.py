@@ -347,10 +347,12 @@ class BatchRequest:
     prompt_text: str
     model: str
     analysis_block: str | None = None
+    qa_feedback: str | None = None   # a re-extraction's previous-attempt QA block, as in extract()
 
     def message_kwargs(self, file_id: str) -> dict:
         return _message_kwargs(
-            self.prompt_text, file_id, model=self.model, analysis_block=self.analysis_block
+            self.prompt_text, file_id, model=self.model,
+            analysis_block=self.analysis_block, qa_feedback=self.qa_feedback,
         )
 
 

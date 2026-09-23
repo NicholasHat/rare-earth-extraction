@@ -152,7 +152,7 @@ assistant's tools.
       and as a digitizer handing the model pre-calibrated coordinates (`extraction_v8`)
 - [x] Human review / edit / merge with an append-only audit log, plus an on-demand
       "re-extract with QA feedback" middle path
-- [x] Message Batches API path (50% cheaper) with transparent continuation of paused items
+- [x] Message Batches API path (50% cheaper) with transparent continuation of paused items; raster-figure papers always take it
 - [x] Per-run token/cost telemetry and prompt caching across the code-execution loop
 - [x] Bench calculator with database sanity-checking and Extract% prediction (Pillar B)
 - [x] Tool-calling AI assistant over a guarded read-only SQL tool (Pillar C)
