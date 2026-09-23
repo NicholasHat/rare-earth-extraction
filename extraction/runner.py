@@ -197,14 +197,14 @@ def submit_batch(
     prompt_version: str | None = None,
     model: str | None = None,
     qa_feedback: str | None = None,
-) -> tuple[str, dict[str, BatchItem], dict[str, str]]:
+) -> anthropic_client.BatchSubmission:
     """Run the deterministic pre-pass for each paper and submit one Batches API
     job covering all of them.
 
     `papers` is a list of (custom_id, pdf_bytes); custom_id is the paper's
-    content sha256. Returns (batch_id, items_by_custom_id, file_ids) — the
-    caller persists all three so the batch can be checked/collected later,
-    even across a server restart.
+    content sha256. Returns the submission (batch id, per-paper file ids, the
+    toolkit file id) and fills `items` — the caller persists all of it so the
+    batch can be checked/collected later, even across a server restart.
 
     `qa_feedback` is the previous attempt's QA block (qa_feedback_block) for an
     on-demand re-extraction, exactly as extract_paper takes it; it applies to
@@ -233,8 +233,7 @@ def submit_batch(
         requests.append(_batch_request(items[custom_id], bundle.text))
         pdfs[custom_id] = pdf_bytes
 
-    submission = anthropic_client.submit_batch(requests, pdfs)
-    return submission.batch_id, items, submission.file_ids
+    return anthropic_client.submit_batch(requests, pdfs), items
 
 
 def _batch_request(item: BatchItem, prompt_text: str) -> anthropic_client.BatchRequest:
@@ -253,7 +252,10 @@ def batch_status(batch_id: str) -> str:
 
 
 def collect_batch(
-    batch_id: str, items: dict[str, BatchItem], file_ids: dict[str, str]
+    batch_id: str,
+    items: dict[str, BatchItem],
+    file_ids: dict[str, str],
+    toolkit_file_id: str | None = None,
 ) -> dict[str, ExtractionResult | Exception]:
     """Once the batch has ended, parse + QA every succeeded result.
 
@@ -275,7 +277,9 @@ def collect_batch(
             ).text
         requests.append(_batch_request(item, prompt_text_by_version[item.prompt_version]))
 
-    raw_results = anthropic_client.collect_batch_results(batch_id, requests, file_ids)
+    raw_results = anthropic_client.collect_batch_results(
+        batch_id, requests, file_ids, toolkit_file_id
+    )
     out: dict[str, ExtractionResult | Exception] = {}
     for custom_id, item in items.items():
         raw = raw_results.get(custom_id)
@@ -304,6 +308,6 @@ def collect_batch(
     return out
 
 
-def cleanup_batch_files(file_ids: dict[str, str]) -> None:
+def cleanup_batch_files(file_ids: dict[str, str], toolkit_file_id: str | None = None) -> None:
     """Delete the Files API uploads made for a batch, once results are collected."""
-    anthropic_client.cleanup_batch_files(file_ids)
+    anthropic_client.cleanup_batch_files(file_ids, toolkit_file_id)

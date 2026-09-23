@@ -28,21 +28,23 @@ def test_collect_batch_builds_request_items_with_reloaded_prompt_and_file_id():
 
     captured = {}
 
-    def _fake_collect_batch_results(batch_id, requests, file_ids):
+    def _fake_collect_batch_results(batch_id, requests, file_ids, toolkit_file_id):
         captured["batch_id"] = batch_id
         captured["requests"] = requests
         captured["file_ids"] = file_ids
+        captured["toolkit_file_id"] = toolkit_file_id
         return {}
 
     with patch.object(runner.anthropic_client, "collect_batch_results", side_effect=_fake_collect_batch_results), \
          patch.object(runner.prompt_loader, "load_prompt") as mock_load:
         mock_load.return_value.text = "PROMPT TEXT"
-        runner.collect_batch("batch_1", items, file_ids)
+        runner.collect_batch("batch_1", items, file_ids, "file_kit")
 
     # Prompt reloaded once per distinct version (both items share extraction_v8) — not once per item.
     mock_load.assert_called_once_with("extraction_v8")
     assert captured["batch_id"] == "batch_1"
     assert captured["file_ids"] == file_ids
+    assert captured["toolkit_file_id"] == "file_kit"
     by_id = {req.custom_id: req for req in captured["requests"]}
     assert by_id["sha1"] == BatchRequest("sha1", "PROMPT TEXT", "claude-opus-4-8", "block-1")
     assert by_id["sha2"] == BatchRequest("sha2", "PROMPT TEXT", "claude-opus-4-8", None)
@@ -106,7 +108,7 @@ def test_submit_batch_threads_qa_feedback_into_item_and_request():
 
     def _fake_submit(requests, pdfs):
         captured["requests"] = requests
-        return SimpleNamespace(batch_id="batch_1", file_ids={"sha1": "file_1"})
+        return SimpleNamespace(batch_id="batch_1", file_ids={"sha1": "file_1"}, toolkit_file_id="file_kit")
 
     with patch.object(runner.anthropic_client, "submit_batch", side_effect=_fake_submit), \
          patch.object(runner, "_prepass", return_value=("", [])), \
@@ -114,9 +116,10 @@ def test_submit_batch_threads_qa_feedback_into_item_and_request():
         mock_load.return_value.text = "PROMPT TEXT"
         mock_load.return_value.version = "extraction_v10"
         mock_load.return_value.sha256 = "abc"
-        _, items, _ = runner.submit_batch(
+        submission, items = runner.submit_batch(
             [("sha1", b"%PDF")], figure_is_curve=True, qa_feedback="## QA FEEDBACK"
         )
+    assert submission.toolkit_file_id == "file_kit"
 
     assert items["sha1"].qa_feedback == "## QA FEEDBACK"
     assert captured["requests"][0].qa_feedback == "## QA FEEDBACK"

@@ -151,13 +151,19 @@ def test_batch_job_round_trips_a_re_extraction_and_loads_older_sidecars(_staging
     written before the field existed still loads, as a first extraction."""
     job = _job()
     job.items["a" * 64].qa_feedback = "## QA FEEDBACK"
+    job.toolkit_file_id = "file_kit"
     job.save()
-    assert staging.load_batch_jobs()["msgbatch_1"].items["a" * 64].qa_feedback == "## QA FEEDBACK"
+    loaded = staging.load_batch_jobs()["msgbatch_1"]
+    assert loaded.items["a" * 64].qa_feedback == "## QA FEEDBACK"
+    assert loaded.toolkit_file_id == "file_kit"
 
     payload = json.loads(job.path.read_text())
     del payload["items"]["a" * 64]["qa_feedback"]
+    del payload["toolkit_file_id"]
     job.path.write_text(json.dumps(payload))
-    assert staging.load_batch_jobs()["msgbatch_1"].items["a" * 64].qa_feedback is None
+    loaded = staging.load_batch_jobs()["msgbatch_1"]
+    assert loaded.items["a" * 64].qa_feedback is None
+    assert loaded.toolkit_file_id is None      # continuation rebuilds the request as it was sent
 
 
 def test_batch_job_delete_and_corrupt_sidecar(_staging_dir):

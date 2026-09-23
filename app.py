@@ -67,7 +67,7 @@ def _tier_for(staged: StagedPaper) -> ReviewTier:
     one figure page; 'raster' from the upload triage or the pre-pass's own
     per-page verdict, whichever noticed."""
     result = staged.result
-    is_raster = bool(staged.paper.meta.get("is_raster_figure")) or "(raster images)" in result.curve_analysis
+    is_raster = bool(staged.paper.meta.get("is_raster_figure")) or "(raster image" in result.curve_analysis
     return review_tier(result.qa_report.verdict, bool(result.deterministic_counts), is_raster)
 
 
@@ -147,7 +147,7 @@ def _submit_batch_job(
     across a server restart. With `qa_feedback` it is a re-extraction: the
     job's result replaces the paper's staged one when it is collected."""
     try:
-        batch_id, items, file_ids = runner.submit_batch(
+        submission, items = runner.submit_batch(
             [(paper.sha, pdf_bytes) for paper, pdf_bytes in papers],
             figure_is_curve=figure_is_curve, qa_feedback=qa_feedback,
         )
@@ -158,13 +158,14 @@ def _submit_batch_job(
         st.error(f"Batch submission failed: {e}")
         return
     BatchJob(
-        batch_id=batch_id,
-        file_ids=file_ids,
+        batch_id=submission.batch_id,
+        file_ids=submission.file_ids,
+        toolkit_file_id=submission.toolkit_file_id,
         items=items,
         papers={paper.sha: paper for paper, _ in papers},
     ).save()
     st.success(
-        f"Batch submitted: {len(papers)} paper(s), batch_id={batch_id}. Batches usually "
+        f"Batch submitted: {len(papers)} paper(s), batch_id={submission.batch_id}. Batches usually "
         "finish within an hour (up to 24h) — come back to 'Batch API jobs' and click "
         "'Check status' to retrieve results once it's done."
     )
@@ -185,7 +186,7 @@ def _collect_batch_job(job: BatchJob) -> None:
     render_batch_jobs.
     """
     try:
-        results = runner.collect_batch(job.batch_id, job.items, job.file_ids)
+        results = runner.collect_batch(job.batch_id, job.items, job.file_ids, job.toolkit_file_id)
     except Exception as e:
         job.release_lock()
         st.error(f"Could not collect batch results: {e}")
@@ -204,7 +205,7 @@ def _collect_batch_job(job: BatchJob) -> None:
     if errors:
         job.record_failures(errors)
     else:
-        runner.cleanup_batch_files(job.file_ids)
+        runner.cleanup_batch_files(job.file_ids, job.toolkit_file_id)
         job.delete()
 
     if n_ok:
@@ -279,7 +280,7 @@ def render_batch_jobs() -> None:
                     st.rerun()
             with col2:
                 if job.errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):
-                    runner.cleanup_batch_files(job.file_ids)
+                    runner.cleanup_batch_files(job.file_ids, job.toolkit_file_id)
                     job.delete()
                     st.rerun()
 

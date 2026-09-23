@@ -310,7 +310,7 @@ def test_extract_reports_usage_of_completed_turns_and_the_dying_stream():
     with patch("anthropic.Anthropic") as mock_anthropic:
         client = MagicMock()
         client.beta.messages.stream.side_effect = _stream
-        client.beta.files.upload.return_value.id = "file_1"
+        client.beta.files.upload.side_effect = [SimpleNamespace(id="file_pdf"), SimpleNamespace(id="file_kit")]
         mock_anthropic.return_value = client
         with pytest.raises(anthropic_client.ExtractionFailed) as exc:
             anthropic_client.extract("prompt", b"%PDF", model="claude-sonnet-5")
@@ -323,7 +323,8 @@ def test_extract_reports_usage_of_completed_turns_and_the_dying_stream():
     }
     assert err.turns_completed == 1                 # the partial message is not a completed turn
     assert "1,300 out" in str(err) and "credit balance too low" in str(err)
-    client.beta.files.delete.assert_called_once_with("file_1")   # cleanup still happens
+    # Cleanup still happens: the PDF and the toolkit upload are both deleted.
+    assert sorted(c.args[0] for c in client.beta.files.delete.call_args_list) == ["file_kit", "file_pdf"]
 
 
 def test_extract_wraps_a_bad_final_stop_reason_with_its_full_usage():
@@ -343,3 +344,56 @@ def test_extract_wraps_a_bad_final_stop_reason_with_its_full_usage():
 def test_partial_message_is_ignored_when_the_stream_never_started():
     """A MagicMock stream (or the SDK before message_start) has no real usage."""
     assert anthropic_client._partial_message(MagicMock()) is None
+
+
+# --------------------------------------------------------------------------- #
+# The sandbox toolkit rides along with every request
+# --------------------------------------------------------------------------- #
+def test_user_turn_carries_the_toolkit_and_its_guide_before_the_cached_instruction():
+    content = anthropic_client._build_user_content("file_pdf", "PREPASS", toolkit_file_id="file_kit")
+    assert [b["type"] for b in content] == ["document", "container_upload", "container_upload", "text", "text", "text"]
+    assert content[2]["file_id"] == "file_kit"
+    assert content[3]["text"].startswith("## SANDBOX TOOLKIT")
+    assert content[4]["text"] == "PREPASS"
+    assert "cache_control" in content[-1]           # the breakpoint stays on the last block
+    # A request persisted before the toolkit existed is rebuilt without it.
+    assert [b["type"] for b in anthropic_client._build_user_content("file_pdf", None)] == ["document", "container_upload", "text"]
+
+
+def test_submit_batch_uploads_the_toolkit_once_and_every_request_references_it():
+    uploads = iter([SimpleNamespace(id="file_kit"), SimpleNamespace(id="file_a"), SimpleNamespace(id="file_b")])
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = MagicMock()
+        client.beta.files.upload.side_effect = lambda file: next(uploads)
+        client.beta.messages.batches.create.return_value.id = "batch_1"
+        mock_anthropic.return_value = client
+        sub = anthropic_client.submit_batch(
+            [BatchRequest("a", "p", "claude-sonnet-5"), BatchRequest("b", "p", "claude-sonnet-5")],
+            {"a": b"%PDF-a", "b": b"%PDF-b"},
+        )
+    assert sub == anthropic_client.BatchSubmission("batch_1", {"a": "file_a", "b": "file_b"}, "file_kit")
+    first_upload = client.beta.files.upload.call_args_list[0].kwargs["file"]
+    assert first_upload[0] == anthropic_client.sandbox_toolkit.FILENAME and first_upload[2] == "application/zip"
+    for req in client.beta.messages.batches.create.call_args.kwargs["requests"]:
+        uploads_in_turn = [b["file_id"] for b in req["params"]["messages"][0]["content"] if b["type"] == "container_upload"]
+        assert uploads_in_turn == [{"a": "file_a", "b": "file_b"}[req["custom_id"]], "file_kit"]
+
+
+def test_continuation_of_a_batch_item_rebuilds_the_request_with_the_jobs_toolkit():
+    paused = SimpleNamespace(custom_id="sha1", result=SimpleNamespace(type="succeeded", message=_msg("pause_turn")))
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = _fake_client([_msg("end_turn", "done")])
+        client.beta.messages.batches.results.return_value = [paused]
+        mock_anthropic.return_value = client
+        collect_batch_results("batch_1", [BatchRequest("sha1", "p", "m")], {"sha1": "file_pdf"}, "file_kit")
+    sent = _sent_messages(client)[0]["content"]
+    assert [b.get("file_id") for b in sent if b["type"] == "container_upload"] == ["file_pdf", "file_kit"]
+
+
+def test_cleanup_deletes_the_toolkit_upload_too():
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = MagicMock()
+        mock_anthropic.return_value = client
+        anthropic_client.cleanup_batch_files({"a": "file_a"}, "file_kit")
+        anthropic_client.cleanup_batch_files({"a": "file_a"})            # a pre-toolkit job
+    assert [c.args[0] for c in client.beta.files.delete.call_args_list] == ["file_a", "file_kit", "file_a"]

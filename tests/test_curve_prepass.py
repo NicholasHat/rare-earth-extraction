@@ -11,6 +11,7 @@ from extraction.curve_extractor import AxisCalibration, CurveExtractionResult, M
 from extraction.curve_prepass import (
     CurvePrepass,
     FigurePage,
+    RasterPage,
     _looks_panel_merged,
     analyze,
 )
@@ -40,13 +41,15 @@ def test_prompt_block_marks_authoritative_and_raster():
     p = CurvePrepass(
         confident_pages=[FigurePage(2, [19] * 9, confident=True)],
         unverified_pages=[FigurePage(4, [27, 26, 12], confident=False)],
-        raster_pages=[0, 6],
+        raster_pages=[RasterPage(0, (10.0, 20.5, 300.0, 400.25)), RasterPage(6, (1, 2, 3, 4))],
     )
     block = p.to_prompt_block()
     assert "Page 2 (authoritative)" in block
     assert "9 distinct data series" in block and "19 digitised markers" in block
     assert "verify visually" in block
-    assert "raster images" in block
+    # Raster pages name the figure's bbox so the model renders straight to it.
+    assert "Page 0 (raster image)" in block and "(10.0, 20.5, 300.0, 400.2) pt" in block
+    assert "Page 6 (raster image)" in block and "SANDBOX TOOLKIT" in block
 
 
 def test_prompt_block_injects_calibrated_coordinates_for_authoritative_page():

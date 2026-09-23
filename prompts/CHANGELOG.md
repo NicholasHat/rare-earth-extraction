@@ -4,7 +4,31 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v10 — in-plot text is not data; tangled raster series are omitted, not guessed (current pinned default)
+## extraction_v11 — the sandbox toolkit replaces hand-written raster digitisers (current pinned default)
+- Companion to `extraction/sandbox_toolkit.py`: the repository's tested
+  `curve_extractor` package now rides into the code-execution sandbox next to
+  the PDF, described by a per-run "SANDBOX TOOLKIT" user-turn block (injected
+  like the curve pre-pass block, never part of this file). Diagnosed on Quinn
+  et al. 2015 under v9 (Batch, 2026-09-16): 51 code-execution iterations and
+  still unfinished — ~18 of them probing the environment (pdfplumber's install
+  is broken there; PyMuPDF works) or exploring page structure the pre-pass
+  already knew, the rest writing a blob detector, text-row filter and
+  calibrator from scratch across seven scripts. Every iteration re-reads the
+  whole growing transcript, so the loop length is the cost.
+- Step 2 no longer asks for a pdfplumber probe: the DETERMINISTIC CURVE
+  ANALYSIS block classifies every figure page (raster pages now carry the
+  figure's PDF bbox), and any probe uses PyMuPDF.
+- Step 3 and Step 5 route raster figures through the toolkit's
+  `find_frame` / `tick_pixels` / `fit_axis` / `detect_markers_in_image`
+  instead of describing the algorithm for the model to re-implement.
+- New OUTPUT CONTRACT section "Sandbox toolkit (when present)" with a budget
+  of about three code runs per raster figure, and a rewritten "How you receive
+  the paper" (no `pip install pdfplumber`, no directory listing to find the
+  file). Two matching "Common pitfalls" rows. Everything else is unchanged
+  from v10.
+- (Not yet validated live — no `prompt_runs` record exists for this version.)
+
+## extraction_v10 — in-plot text is not data; tangled raster series are omitted, not guessed
 - Found on Quinn et al. 2015 (raster, monochrome): every Fig. 2 panel prints its
   title inside the frame at log D ≈ 0.7, and the model digitised those letters
   as the filled-square (Lu) series — thirteen rows at 83–85 %E in series whose

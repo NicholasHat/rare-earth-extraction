@@ -199,6 +199,7 @@ class BatchJob:
     submitted_at: str = field(default_factory=_now_iso)
     errors: dict[str, str] = field(default_factory=dict)   # sha -> why collection failed
     collection_started_at: str | None = None
+    toolkit_file_id: str | None = None  # the job's sandbox-toolkit upload; None before it existed
 
     @property
     def path(self):
@@ -247,6 +248,7 @@ class BatchJob:
             submitted_at=payload.get("submitted_at") or _now_iso(),
             errors=payload.get("errors") or {},
             collection_started_at=payload.get("collection_started_at"),
+            toolkit_file_id=payload.get("toolkit_file_id"),
         )
 
 

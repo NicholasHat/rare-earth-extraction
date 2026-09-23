@@ -47,6 +47,8 @@ import anthropic
 
 import config
 
+from . import sandbox_toolkit
+
 _BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13"]
 _CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
 
@@ -162,12 +164,21 @@ _USER_INSTRUCTION = (
 
 
 def _build_user_content(
-    file_id: str, analysis_block: str | None, qa_feedback: str | None = None
+    file_id: str,
+    analysis_block: str | None,
+    qa_feedback: str | None = None,
+    toolkit_file_id: str | None = None,
 ) -> list[dict]:
     content: list[dict] = [
         {"type": "document", "source": {"type": "file", "file_id": file_id}},
         {"type": "container_upload", "file_id": file_id},
     ]
+    # The digitisation toolkit (extraction/sandbox_toolkit.py) rides along as a
+    # second sandbox file, described by its own guidance block. Optional only
+    # so a request persisted before it existed is rebuilt exactly as sent.
+    if toolkit_file_id:
+        content.append({"type": "container_upload", "file_id": toolkit_file_id})
+        content.append({"type": "text", "text": sandbox_toolkit.guide()})
     # Inject the deterministic curve pre-pass (plan §6) before the instruction so
     # the model treats the authoritative marker counts as a grounding anchor.
     if analysis_block:
@@ -198,6 +209,7 @@ def _message_kwargs(
     model: str,
     analysis_block: str | None,
     qa_feedback: str | None = None,
+    toolkit_file_id: str | None = None,
 ) -> dict:
     """Build the model-call kwargs shared by the synchronous and Batch API paths."""
     return dict(
@@ -225,7 +237,10 @@ def _message_kwargs(
                 "total": config.EXTRACTION_TASK_BUDGET_TOKENS,
             }
         },
-        messages=[{"role": "user", "content": _build_user_content(file_id, analysis_block, qa_feedback)}],
+        messages=[{
+            "role": "user",
+            "content": _build_user_content(file_id, analysis_block, qa_feedback, toolkit_file_id),
+        }],
     )
 
 
@@ -377,9 +392,10 @@ def extract(
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
     uploaded = client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf"))
+    toolkit = _upload_toolkit(client)
     kwargs = _message_kwargs(
         prompt_text, uploaded.id, model=model,
-        analysis_block=analysis_block, qa_feedback=qa_feedback,
+        analysis_block=analysis_block, qa_feedback=qa_feedback, toolkit_file_id=toolkit.id,
     )
     chain: list = []
     try:
@@ -389,6 +405,13 @@ def extract(
         raise _failed(e, chain) from e
     finally:
         client.beta.files.delete(uploaded.id)
+        client.beta.files.delete(toolkit.id)
+
+
+def _upload_toolkit(client: anthropic.Anthropic):
+    return client.beta.files.upload(
+        file=(sandbox_toolkit.FILENAME, sandbox_toolkit.bundle(), "application/zip")
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -416,10 +439,11 @@ class BatchRequest:
     analysis_block: str | None = None
     qa_feedback: str | None = None   # a re-extraction's previous-attempt QA block, as in extract()
 
-    def message_kwargs(self, file_id: str) -> dict:
+    def message_kwargs(self, file_id: str, toolkit_file_id: str | None = None) -> dict:
         return _message_kwargs(
             self.prompt_text, file_id, model=self.model,
             analysis_block=self.analysis_block, qa_feedback=self.qa_feedback,
+            toolkit_file_id=toolkit_file_id,
         )
 
 
@@ -427,6 +451,7 @@ class BatchRequest:
 class BatchSubmission:
     batch_id: str
     file_ids: dict[str, str]   # custom_id -> uploaded Files API id (cleanup after collection)
+    toolkit_file_id: str       # the one toolkit upload every request in the job shares
 
 
 def submit_batch(requests: list[BatchRequest], pdfs: dict[str, bytes]) -> BatchSubmission:
@@ -434,6 +459,7 @@ def submit_batch(requests: list[BatchRequest], pdfs: dict[str, bytes]) -> BatchS
     Batches API job covering every request."""
     client = anthropic.Anthropic()
 
+    toolkit = _upload_toolkit(client)
     file_ids: dict[str, str] = {}
     params = []
     for req in requests:
@@ -441,10 +467,13 @@ def submit_batch(requests: list[BatchRequest], pdfs: dict[str, bytes]) -> BatchS
             file=("paper.pdf", pdfs[req.custom_id], "application/pdf")
         )
         file_ids[req.custom_id] = uploaded.id
-        params.append({"custom_id": req.custom_id, "params": req.message_kwargs(uploaded.id)})
+        params.append({
+            "custom_id": req.custom_id,
+            "params": req.message_kwargs(uploaded.id, toolkit.id),
+        })
 
     batch = client.beta.messages.batches.create(betas=_BETAS, requests=params)
-    return BatchSubmission(batch_id=batch.id, file_ids=file_ids)
+    return BatchSubmission(batch_id=batch.id, file_ids=file_ids, toolkit_file_id=toolkit.id)
 
 
 def poll_batch_status(batch_id: str) -> str:
@@ -454,14 +483,18 @@ def poll_batch_status(batch_id: str) -> str:
 
 
 def collect_batch_results(
-    batch_id: str, requests: list[BatchRequest], file_ids: dict[str, str]
+    batch_id: str,
+    requests: list[BatchRequest],
+    file_ids: dict[str, str],
+    toolkit_file_id: str | None = None,
 ) -> dict[str, ExtractResponse | Exception]:
     """Fetch results once the batch has ended. Keyed by custom_id.
 
-    `requests` are the same BatchRequests originally submitted and `file_ids`
-    their already-uploaded PDFs (no need to re-upload). Both are only used to
-    rebuild the request for a paused item (below); an item that finished
-    cleanly never touches them.
+    `requests` are the same BatchRequests originally submitted, `file_ids`
+    their already-uploaded PDFs and `toolkit_file_id` the job's toolkit upload
+    (None for a job submitted before the toolkit existed). All three are only
+    used to rebuild the request for a paused item (below), which must match
+    the one the batch ran; an item that finished cleanly never touches them.
 
     A result that errored/canceled/expired — or that raises while being read or
     continued — is surfaced as an Exception value rather than raised, so one bad
@@ -491,7 +524,7 @@ def collect_batch_results(
             chain = [message]
             if _resumable(message):
                 req = by_id[result.custom_id]
-                kwargs = req.message_kwargs(file_ids[result.custom_id])
+                kwargs = req.message_kwargs(file_ids[result.custom_id], toolkit_file_id)
                 chain = _continue_until_done(client, kwargs, chain)
             out[result.custom_id] = _response_from_chain(chain)
         except Exception as e:
@@ -508,10 +541,10 @@ def collect_batch_results(
     return out
 
 
-def cleanup_batch_files(file_ids: dict[str, str]) -> None:
+def cleanup_batch_files(file_ids: dict[str, str], toolkit_file_id: str | None = None) -> None:
     """Delete the Files API uploads made for a batch, once results are collected."""
     client = anthropic.Anthropic()
-    for file_id in file_ids.values():
+    for file_id in [*file_ids.values(), *([toolkit_file_id] if toolkit_file_id else [])]:
         try:
             client.beta.files.delete(file_id)
         except Exception:

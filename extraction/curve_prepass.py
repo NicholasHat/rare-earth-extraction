@@ -76,10 +76,19 @@ class FigurePage:
 
 
 @dataclass
+class RasterPage:
+    """A figure page whose plot is an embedded image: nothing to count, but the
+    image's PDF bounding box lets the model render straight to the figure with
+    the sandbox toolkit instead of hunting for it."""
+    page_index: int
+    figure_bbox: tuple[float, float, float, float]   # (x0, top, x1, bottom), PDF points
+
+
+@dataclass
 class CurvePrepass:
     confident_pages: list[FigurePage] = field(default_factory=list)
     unverified_pages: list[FigurePage] = field(default_factory=list)
-    raster_pages: list[int] = field(default_factory=list)
+    raster_pages: list[RasterPage] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -125,10 +134,12 @@ class CurvePrepass:
                 f"multi-panel figure the deterministic pass can't cleanly separate. Digitise "
                 f"it fully yourself; treat these counts only as a floor."
             )
-        if self.raster_pages:
+        for rp in self.raster_pages:
+            bbox = ", ".join(f"{v:.1f}" for v in rp.figure_bbox)
             lines.append(
-                f"- **Page(s) {self.raster_pages} (raster images):** not deterministically "
-                f"counted — digitise visually as usual."
+                f"- **Page {rp.page_index} (raster image):** figure image at PDF bbox "
+                f"(x0, top, x1, bottom) = ({bbox}) pt — not deterministically counted. "
+                f"Render that region and digitise it with the SANDBOX TOOLKIT."
             )
         return "\n".join(lines)
 
@@ -241,6 +252,6 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
             (result.confident_pages if fp.confident else result.unverified_pages).append(fp)
             result.warnings.extend(f"page {idx}: {w}" for w in res.warnings)
         elif res.source == "raster" and res.figure_bbox is not None:
-            result.raster_pages.append(idx)
+            result.raster_pages.append(RasterPage(idx, tuple(res.figure_bbox)))
 
     return result
