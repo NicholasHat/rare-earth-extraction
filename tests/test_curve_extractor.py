@@ -7,6 +7,7 @@ LLM runs under-counted).
 """
 import math
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -274,7 +275,7 @@ def test_template_recovery_finds_marker_lost_by_blob_filtering():
     assert len(blobs) == 6
     lost = min(blobs, key=lambda b: b["cx"])
     kept = [b for b in blobs if b is not lost]
-    recovered = raster._recover_missed_markers(raster._ink_mask(img), kept)
+    recovered, _ = raster._recover_missed_markers(raster._ink_mask(img), kept)
     assert len(recovered) == 1
     family, cx, cy = recovered[0]
     assert family == "filled_square"
@@ -287,7 +288,7 @@ def test_template_recovery_needs_enough_exemplars():
         _draw_square(img, 40 + 70 * i, 50)
     blobs = raster.detect_blobs(img)
     # Only 3 clean detections (< _TEMPLATE_MIN_EXEMPLARS) — no recovery attempted.
-    assert raster._recover_missed_markers(raster._ink_mask(img), blobs) == []
+    assert raster._recover_missed_markers(raster._ink_mask(img), blobs) == ([], [])
 
 
 # --- integration (real PDF, skipped if absent) ------------------------------ #
@@ -311,3 +312,96 @@ def test_vector_path_recovers_uniform_marker_counts():
     # but that path has no oracle count yet (plan §5.2), so it's exercised here
     # only informally, not asserted on — same caution curve_prepass.py applies.
     assert filled_counts == [19] * 9
+
+
+# --- raster image-level entry points (what the sandbox toolkit exposes) ------ #
+
+def _figure(w=400, h=300, frame=(40, 20, 380, 260), ticks_x=(80, 160, 240, 320), ticks_y=(60, 120, 180, 240)):
+    """A synthetic single-panel figure: white page, 2px frame, 8px ticks just
+    inside the frame, no markers. Callers draw markers on top."""
+    img = np.full((h, w), 255, dtype=np.uint8)
+    x0, top, x1, bottom = frame
+    img[top:top + 2, x0:x1 + 1] = 0
+    img[bottom - 1:bottom + 1, x0:x1 + 1] = 0
+    img[top:bottom + 1, x0:x0 + 2] = 0
+    img[top:bottom + 1, x1 - 1:x1 + 1] = 0
+    for tx in ticks_x:
+        img[bottom - 9:bottom - 1, tx:tx + 2] = 0        # 8 px tall, 2 px wide, inside
+    for ty in ticks_y:
+        img[ty:ty + 2, x0 + 2:x0 + 10] = 0              # 8 px long, inside
+    return img
+
+
+def _square(img, cx, cy, side=12):
+    img[cy - side // 2:cy + side // 2, cx - side // 2:cx + side // 2] = 0
+
+
+def _circle(img, cx, cy, r=6):
+    yy, xx = np.ogrid[:img.shape[0], :img.shape[1]]
+    img[(yy - cy) ** 2 + (xx - cx) ** 2 <= r * r] = 0
+
+
+def test_find_frame_locates_the_plot_box():
+    assert raster.find_frame(_figure()) == (40, 20, 380, 260)
+
+
+def test_find_frame_none_without_frame_lines():
+    assert raster.find_frame(np.full((100, 100), 255, dtype=np.uint8)) is None
+
+
+def test_tick_pixels_finds_inside_ticks_on_both_axes():
+    img = _figure()
+    frame = raster.find_frame(img)
+    assert raster.tick_pixels(img, frame, "x") == pytest.approx([80.5, 160.5, 240.5, 320.5])
+    assert raster.tick_pixels(img, frame, "y") == pytest.approx([60.5, 120.5, 180.5, 240.5])
+
+
+def test_tick_pixels_ignores_a_marker_sitting_on_the_axis():
+    img = _figure()
+    _square(img, 200, 255)                              # a 12 px marker touching the bottom edge
+    frame = raster.find_frame(img)
+    assert raster.tick_pixels(img, frame, "x") == pytest.approx([80.5, 160.5, 240.5, 320.5])
+
+
+def test_tick_pixels_falls_back_to_outside_ticks():
+    img = _figure(ticks_x=(), ticks_y=())
+    for tx in (100, 200, 300):
+        img[262:270, tx:tx + 2] = 0                     # below the bottom line
+    frame = raster.find_frame(img)
+    assert raster.tick_pixels(img, frame, "x") == pytest.approx([100.5, 200.5, 300.5])
+
+
+def test_detect_markers_in_image_groups_by_shape_family():
+    img = _figure()
+    for i, cx in enumerate(range(80, 340, 40)):
+        _square(img, cx, 100)
+        _circle(img, cx, 180)
+    records, warnings = raster.detect_markers_in_image(img)
+    by_family = {}
+    for r in records:
+        by_family.setdefault(r.group_key, []).append(r)
+    assert len(by_family["filled_square"]) == 7
+    assert len(by_family["filled_circle"]) == 7
+    assert all(abs(r.pixel_y - 100) < 1.5 for r in by_family["filled_square"])
+    assert all(abs(r.pixel_y - 180) < 1.5 for r in by_family["filled_circle"])
+    assert any("ESTIMATE" in w for w in warnings)
+
+
+def test_detect_markers_in_image_without_scikit_image_still_detects(monkeypatch):
+    def _missing():
+        raise ImportError("No module named 'skimage'")
+    monkeypatch.setattr(raster, "_template_tools", _missing)
+    img = _figure()
+    for cx in range(80, 340, 40):
+        _square(img, cx, 100)
+    records, warnings = raster.detect_markers_in_image(img)
+    assert len(records) == 7
+    assert any("scikit-image" in w for w in warnings)
+
+
+def test_detect_markers_matches_the_page_path():
+    """detect_markers(page, bbox) is render + detect_markers_in_image — same result."""
+    img = _figure()
+    _square(img, 100, 100)
+    with patch.object(raster, "render_region", return_value=img):
+        assert raster.detect_markers(object(), (0, 0, 1, 1)) == raster.detect_markers_in_image(img)

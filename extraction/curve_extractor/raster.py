@@ -17,6 +17,12 @@ and calibration are left to the caller/LLM, same seam as the vector path.
 This is a best-effort detector: monochrome shape coding at ~15px with crowded
 panels is the hardest figure class, so callers should treat its counts as
 review-gated, not ground truth (the warnings surface low-confidence groups).
+
+The image-level entry points (`find_frame`, `tick_pixels`, `detect_markers_in_image`)
+take a plain grayscale array, so they run unchanged inside the model's
+code-execution sandbox, where this package is shipped as a toolkit
+(extraction/sandbox_toolkit.py) and the page is rendered with whatever PDF
+library that sandbox has; scikit-image is optional there (see _template_tools).
 """
 from __future__ import annotations
 
@@ -25,7 +31,6 @@ from collections import defaultdict
 
 import numpy as np
 from scipy import ndimage
-from skimage.feature import match_template, peak_local_max
 
 from .types import MarkerRecord
 
@@ -60,6 +65,20 @@ _TRIANGLE_CENTROID_OFFSET = 0.08
 # an exemplar patch, and a correlation peak this strong to call it a marker.
 _TEMPLATE_MIN_EXEMPLARS = 4
 _TEMPLATE_MATCH_THRESHOLD = 0.6
+# Plot-frame / tick detection on the rendered region (300 dpi scale): a frame
+# line is an ink run across at least this fraction of the image; a tick is a
+# short run perpendicular to the frame edge, at most this wide.
+_FRAME_MIN_FRAC = 0.5
+_TICK_BAND_PX = 15
+_TICK_MIN_LEN_PX = 3
+_TICK_MAX_WIDTH_PX = 4
+
+
+def _template_tools():
+    """scikit-image is optional: absent in the model's code-execution sandbox
+    unless installed, so the recovery pass degrades to a warning there."""
+    from skimage.feature import match_template, peak_local_max
+    return match_template, peak_local_max
 
 
 def render_region(page, bbox, dpi: int = _RENDER_DPI) -> np.ndarray:
@@ -73,6 +92,85 @@ def render_region(page, bbox, dpi: int = _RENDER_DPI) -> np.ndarray:
 
 def _ink_mask(arr: np.ndarray) -> np.ndarray:
     return arr < _DARK_THRESHOLD
+
+
+def find_frame(arr: np.ndarray) -> tuple[int, int, int, int] | None:
+    """The plot frame of a rendered single-panel figure region as pixel
+    (x0, top, x1, bottom): the outermost rows and columns whose ink run spans
+    at least half the image. None when no such lines exist. For a multi-panel
+    figure, crop to one panel first — this finds the outer box otherwise."""
+    ink = _ink_mask(arr)
+    h, w = ink.shape
+    rows = np.nonzero(ink.sum(axis=1) >= _FRAME_MIN_FRAC * w)[0]
+    cols = np.nonzero(ink.sum(axis=0) >= _FRAME_MIN_FRAC * h)[0]
+    if len(rows) < 2 or len(cols) < 2 or rows[-1] - rows[0] < 10 or cols[-1] - cols[0] < 10:
+        return None
+    return int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1])
+
+
+def _frame_thickness(ink: np.ndarray, frame, edge: str) -> int:
+    """How many pixel rows/columns the given frame edge line occupies, walking
+    inward from the edge while the line is still there."""
+    x0, top, x1, bottom = frame
+    h, w = ink.shape
+    line = {
+        "top": lambda n: ink[top + n, x0:x1 + 1] if top + n < h else None,
+        "bottom": lambda n: ink[bottom - n, x0:x1 + 1] if bottom - n >= 0 else None,
+        "left": lambda n: ink[top:bottom + 1, x0 + n] if x0 + n < w else None,
+        "right": lambda n: ink[top:bottom + 1, x1 - n] if x1 - n >= 0 else None,
+    }[edge]
+    n = 0
+    while (row := line(n)) is not None and row.mean() >= _FRAME_MIN_FRAC:
+        n += 1
+    return max(n, 1)
+
+
+def _run_centres(hits: np.ndarray, offset: int) -> list[float]:
+    """Centres of runs of consecutive True values, no wider than a tick."""
+    centres: list[float] = []
+    idx = np.nonzero(hits)[0]
+    if not len(idx):
+        return centres
+    start = prev = idx[0]
+    for i in list(idx[1:]) + [None]:
+        if i is not None and i == prev + 1:
+            prev = i
+            continue
+        if prev - start + 1 <= _TICK_MAX_WIDTH_PX:
+            centres.append(offset + (start + prev) / 2.0)
+        if i is not None:
+            start = prev = i
+    return centres
+
+
+def tick_pixels(arr: np.ndarray, frame, axis: str) -> list[float]:
+    """Best-effort tick-mark centres along the bottom (`axis="x"`) or left
+    (`axis="y"`) frame edge, in pixel coordinates of `arr`: short ink runs
+    perpendicular to the edge, just inside the frame (or, failing that, just
+    outside). Pair them with the tick labels read off the figure and call
+    calibrate.fit_axis. Check the count against the labels — a marker sitting
+    on the axis line can masquerade as a tick, and a figure with unlabelled
+    minor ticks yields more centres than labels."""
+    ink = _ink_mask(arr)
+    x0, top, x1, bottom = frame
+    h, w = ink.shape
+    # The frame's own lines must not read as ticks: scan only strictly inside them.
+    t = {edge: _frame_thickness(ink, frame, edge) for edge in ("top", "bottom", "left", "right")}
+    inner_x = slice(x0 + t["left"], x1 - t["right"] + 1)
+    inner_y = slice(top + t["top"], bottom - t["bottom"] + 1)
+
+    def scan(band: np.ndarray, along_axis: int, offset: int) -> list[float]:
+        return _run_centres(band.sum(axis=along_axis) >= _TICK_MIN_LEN_PX, offset)
+
+    if axis == "x":
+        inside = ink[max(inner_y.stop - _TICK_BAND_PX, 0):inner_y.stop, inner_x]
+        outside = ink[bottom + 1:min(bottom + 1 + _TICK_BAND_PX, h), inner_x]
+        found = scan(inside, 0, inner_x.start)
+        return found if len(found) >= 2 else scan(outside, 0, inner_x.start)
+    inside = ink[inner_y, inner_x.start:min(inner_x.start + _TICK_BAND_PX, w)]
+    outside = ink[inner_y, max(x0 - _TICK_BAND_PX, 0):x0]
+    found = scan(inside, 1, inner_y.start)
+    return found if len(found) >= 2 else scan(outside, 1, inner_y.start)
 
 
 def detect_blobs(arr: np.ndarray) -> list[dict]:
@@ -177,8 +275,9 @@ def classify_blob_shape(blob: dict) -> tuple[str, str]:
 
 def _recover_missed_markers(
     ink: np.ndarray, kept: list[dict]
-) -> list[tuple[str, float, float]]:
-    """Template-matching recovery pass (scikit-image).
+) -> tuple[list[tuple[str, float, float]], list[str]]:
+    """Template-matching recovery pass (scikit-image; skipped with a warning
+    when it isn't installed).
 
     A marker that overlaps a curve, another marker, or baked-in text merges into
     a blob the size/aspect filters rightly reject — blob detection alone
@@ -189,6 +288,11 @@ def _recover_missed_markers(
     marker; still estimate-tier — the pre-pass never marks raster pages
     authoritative.
     """
+    try:
+        match_template, peak_local_max = _template_tools()
+    except ImportError:
+        return [], ["raster: scikit-image not installed — template-matching recovery of "
+                    "overlapped markers skipped (pip install scikit-image to enable)."]
     by_family: dict[str, list[dict]] = defaultdict(list)
     for b in kept:
         mtype, family = classify_blob_shape(b)
@@ -218,18 +322,27 @@ def _recover_missed_markers(
             if all(math.hypot(px - ox, py - oy) > min_dist for ox, oy in occupied):
                 occupied.append((float(px), float(py)))
                 recovered.append((family, float(px), float(py)))
-    return recovered
+    return recovered, []
 
 
 def detect_markers(page, bbox, dpi: int = _RENDER_DPI) -> tuple[list[MarkerRecord], list[str]]:
-    """Best-effort raster marker detection for one figure region.
+    """Best-effort raster marker detection for one figure region of a
+    pdfplumber page — render, then detect_markers_in_image."""
+    return detect_markers_in_image(render_region(page, bbox, dpi))
 
-    Returns (markers, warnings). The count is an ESTIMATE — monochrome shape coding
-    in a multi-panel figure with baked-in text is the hardest case, so callers must
-    treat the result as a lower-confidence hint (the pre-pass never marks raster
-    pages authoritative) and the warnings flag it for manual digitisation.
+
+def detect_markers_in_image(arr: np.ndarray) -> tuple[list[MarkerRecord], list[str]]:
+    """Best-effort raster marker detection on a grayscale figure image.
+
+    Returns (markers, warnings), markers in pixel coordinates of `arr` grouped
+    by shape family (`group_key`: filled_square / filled_circle / filled_triangle
+    / filled_diamond / stroked_glyph / ambiguous). The count is an ESTIMATE —
+    monochrome shape coding in a multi-panel figure with baked-in text is the
+    hardest case, so callers must treat the result as a lower-confidence hint
+    (the pre-pass never marks raster pages authoritative) and the warnings flag
+    it for manual digitisation. Legend and in-plot text are NOT masked here:
+    blank those regions (set to 255) before calling.
     """
-    arr = render_region(page, bbox, dpi)
     raw = detect_blobs(arr)
     warnings: list[str] = []
     if not raw:
@@ -244,7 +357,8 @@ def detect_markers(page, bbox, dpi: int = _RENDER_DPI) -> tuple[list[MarkerRecor
         records.append(MarkerRecord(group_key=shape, marker_type=mtype,
                                     pixel_x=b["cx"], pixel_y=b["cy"]))
 
-    recovered = _recover_missed_markers(_ink_mask(arr), kept)
+    recovered, recovery_warnings = _recover_missed_markers(_ink_mask(arr), kept)
+    warnings.extend(recovery_warnings)
     for family, cx, cy in recovered:
         records.append(MarkerRecord(group_key=family, marker_type="filled",
                                     pixel_x=cx, pixel_y=cy))

@@ -8,10 +8,13 @@ the filled/short heuristics here and in markers.py.
 """
 from __future__ import annotations
 
-import pdfplumber
-
 
 def open_page(pdf_bytes: bytes, page_index: int):
+    # Imported here, not at module level: the package is also shipped into the
+    # model's code-execution sandbox (extraction/sandbox_toolkit.py), where
+    # pdfplumber may not import; everything that takes a page or an image
+    # must still load there.
+    import pdfplumber
     pdf = pdfplumber.open(_BytesIO(pdf_bytes))
     return pdf, pdf.pages[page_index]
 
