@@ -397,3 +397,15 @@ def test_cleanup_deletes_the_toolkit_upload_too():
         anthropic_client.cleanup_batch_files({"a": "file_a"}, "file_kit")
         anthropic_client.cleanup_batch_files({"a": "file_a"})            # a pre-toolkit job
     assert [c.args[0] for c in client.beta.files.delete.call_args_list] == ["file_a", "file_kit", "file_a"]
+
+
+# --------------------------------------------------------------------------- #
+# Effort is a configured experiment, absent by default
+# --------------------------------------------------------------------------- #
+def test_effort_is_sent_only_when_configured():
+    with patch.object(anthropic_client.config, "EXTRACTION_EFFORT", ""):
+        kw = anthropic_client._message_kwargs("p", "file_pdf", model="m", analysis_block=None)
+    assert "effort" not in kw["output_config"] and "task_budget" in kw["output_config"]
+    with patch.object(anthropic_client.config, "EXTRACTION_EFFORT", "medium"):
+        kw = anthropic_client._message_kwargs("p", "file_pdf", model="m", analysis_block=None)
+    assert kw["output_config"]["effort"] == "medium" and "task_budget" in kw["output_config"]

@@ -230,12 +230,14 @@ def _message_kwargs(
         tools=[_CODE_EXECUTION_TOOL],
         # Loose backstop, not a hard cap (that's max_tokens): the model sees
         # a running countdown across the whole tool loop and self-moderates
-        # instead of narrating trial-and-error indefinitely.
+        # instead of narrating trial-and-error indefinitely. Effort (thinking
+        # depth, tool-call consolidation) only when configured — see config.
         output_config={
             "task_budget": {
                 "type": "tokens",
                 "total": config.EXTRACTION_TASK_BUDGET_TOKENS,
-            }
+            },
+            **({"effort": config.EXTRACTION_EFFORT} if config.EXTRACTION_EFFORT else {}),
         },
         messages=[{
             "role": "user",

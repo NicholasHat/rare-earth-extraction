@@ -43,6 +43,15 @@ ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
 # legitimate rich extractions — tune down once more real-run telemetry exists.
 EXTRACTION_TASK_BUDGET_TOKENS = int(os.getenv("EXTRACTION_TASK_BUDGET_TOKENS", "500000"))
 
+# Effort level for the extraction call (`output_config.effort`: low / medium /
+# high / xhigh / max). Empty = don't send it, i.e. the API default (high).
+# Thinking was 74% of output tokens on the 2026-09-16 Quinn batch run (58k of
+# 78k), and a lower effort also consolidates tool calls — so this is the
+# next lever after loop length. It trades thoroughness for spend, which is a
+# measurement, not a setting: A/B it on Swain & Otu (known 322-row answer)
+# through the Batch path before changing the default.
+EXTRACTION_EFFORT = os.getenv("EXTRACTION_EFFORT", "").strip().lower()
+
 
 def ensure_dirs() -> None:
     """Create the runtime data directories if they don't exist."""
