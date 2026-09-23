@@ -195,3 +195,27 @@ def test_collection_lock_self_heals_after_staleness_window():
     stale = datetime.now(timezone.utc) - staging.COLLECTION_LOCK_STALE_AFTER - timedelta(minutes=1)
     job.collection_started_at = stale.isoformat()
     assert not job.collection_in_progress()
+
+
+# --------------------------------------------------------------------------- #
+# Failed-runs log
+# --------------------------------------------------------------------------- #
+
+def test_failed_runs_log_round_trips_newest_first_and_skips_corrupt_lines(_staging_dir):
+    class _Failed(RuntimeError):
+        usage = {"input_tokens": 1, "output_tokens": 2,
+                 "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}
+        turns_completed = 2
+
+    assert staging.load_failed_runs() == []
+    staging.record_failed_run(_paper(), ValueError("first, no usage"))
+    staging.record_failed_run(_paper(), _Failed("second, with usage"))
+    with staging._failed_runs_path().open("a") as f:
+        f.write("{not json\n")
+
+    got = staging.load_failed_runs()
+    assert [g["error"] for g in got] == ["second, with usage", "first, no usage"]
+    assert got[0]["usage"]["output_tokens"] == 2 and got[0]["turns_completed"] == 2
+    assert got[1]["usage"] is None
+    assert got[0]["sha"] == _paper().sha and got[0]["filename"] == _paper().filename
+    assert staging.load_failed_runs(limit=1) == got[:1]

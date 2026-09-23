@@ -51,6 +51,28 @@ _BETAS = ["files-api-2025-04-14", "task-budgets-2026-03-13"]
 _CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
 
 
+_USAGE_FIELDS = (
+    "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+)
+
+
+def _sum_usage(messages: list) -> dict[str, int]:
+    """Token usage summed over a message chain — every message was a separately
+    billed API turn (a mid-stream partial included), so the total is the bill."""
+    return {
+        f: sum(getattr(getattr(m, "usage", None), f, None) or 0 for m in messages)
+        for f in _USAGE_FIELDS
+    }
+
+
+def _describe_usage(usage: dict[str, int]) -> str:
+    return (
+        f"{usage['input_tokens']:,} in / {usage['output_tokens']:,} out / "
+        f"{usage['cache_creation_input_tokens']:,} cache-write / "
+        f"{usage['cache_read_input_tokens']:,} cache-read tokens"
+    )
+
+
 @dataclass(frozen=True)
 class ExtractResponse:
     """One extraction call's text output plus the token usage it billed."""
@@ -60,6 +82,26 @@ class ExtractResponse:
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+
+    def usage(self) -> dict[str, int]:
+        return {f: getattr(self, f) for f in _USAGE_FIELDS}
+
+
+class ExtractionFailed(RuntimeError):
+    """An extraction failed after API money was spent. Carries the token usage
+    billed up to the failure — every completed turn plus whatever a dying
+    stream had already reported — so a failed run leaves a record of what it
+    cost instead of vanishing with the exception (2026-09-22: a ~$7.50 sync
+    run died on an exhausted credit balance and left nothing to diagnose).
+    `cause` is the original error: an SDK error, one of this module's
+    stop-reason RuntimeErrors, or a downstream parse failure."""
+
+    def __init__(self, cause: Exception, usage: dict[str, int], turns_completed: int | None = None):
+        self.cause = cause
+        self.usage = usage
+        self.turns_completed = turns_completed
+        turns = f" over {turns_completed} completed API turn(s)" if turns_completed is not None else ""
+        super().__init__(f"{cause} [billed before failure: {_describe_usage(usage)}{turns}]")
 
 
 _STOP_REASON_ERRORS = {
@@ -196,17 +238,41 @@ def _response_from_chain(messages: list) -> ExtractResponse:
     text = "\n".join(
         block.text for block in messages[-1].content if block.type == "text"
     ).strip()
+    return ExtractResponse(text=text, **_sum_usage(messages))
 
-    def total(attr: str) -> int:
-        return sum(getattr(m.usage, attr, None) or 0 for m in messages)
 
-    return ExtractResponse(
-        text=text,
-        input_tokens=total("input_tokens"),
-        output_tokens=total("output_tokens"),
-        cache_creation_input_tokens=total("cache_creation_input_tokens"),
-        cache_read_input_tokens=total("cache_read_input_tokens"),
+def _failed(cause: Exception, chain: list) -> ExtractionFailed:
+    """Wrap a failure with the chain's usage so far; a stream that died part-way
+    contributes its partial message (no stop_reason) but not a completed turn."""
+    return ExtractionFailed(
+        cause, _sum_usage(chain),
+        turns_completed=sum(1 for m in chain if getattr(m, "stop_reason", None)),
     )
+
+
+def _stream_turn(client: anthropic.Anthropic, kwargs: dict, chain: list) -> None:
+    """Run one API turn and append its final message to `chain`. If the stream
+    dies part-way, the partial message it had accumulated (with the usage
+    reported so far) is appended first, so the failure still accounts for
+    what was billed."""
+    with client.beta.messages.stream(betas=_BETAS, **kwargs) as stream:
+        try:
+            chain.append(stream.get_final_message())
+        except Exception:
+            partial = _partial_message(stream)
+            if partial is not None:
+                chain.append(partial)
+            raise
+
+
+def _partial_message(stream):
+    """The stream's accumulated message, if it got far enough to have one with
+    real usage on it (the SDK raises before the first message_start event)."""
+    try:
+        snapshot = stream.current_message_snapshot
+    except Exception:
+        return None
+    return snapshot if isinstance(getattr(snapshot.usage, "output_tokens", None), int) else None
 
 
 # Server-side tool loops (code execution) pause with stop_reason="pause_turn"
@@ -271,9 +337,7 @@ def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list)
     for _ in range(_MAX_CONTINUATIONS):
         if not _resumable(chain[-1]):
             return chain
-        messages = _transcript(user_content, chain)
-        with client.beta.messages.stream(betas=_BETAS, **{**kwargs, "messages": messages}) as stream:
-            chain.append(stream.get_final_message())
+        _stream_turn(client, {**kwargs, "messages": _transcript(user_content, chain)}, chain)
 
     if chain[-1].stop_reason == "pause_turn":
         raise RuntimeError(
@@ -284,12 +348,12 @@ def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list)
     return chain
 
 
-def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict) -> list:
+def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict, chain: list) -> list:
     """Run one extraction call, automatically resuming through pause_turn.
-    Returns every message in the chain (usually just one)."""
-    with client.beta.messages.stream(betas=_BETAS, **kwargs) as stream:
-        message = stream.get_final_message()
-    return _continue_until_done(client, kwargs, [message])
+    Appends every message to `chain` (usually just one) as it arrives, so the
+    caller still holds what was billed if a later turn raises."""
+    _stream_turn(client, kwargs, chain)
+    return _continue_until_done(client, kwargs, chain)
 
 
 def extract(
@@ -301,7 +365,8 @@ def extract(
     qa_feedback: str | None = None,
 ) -> ExtractResponse:
     """Run one synchronous extraction. Returns the model's text output plus its
-    token usage.
+    token usage. Raises ExtractionFailed, carrying the usage billed so far, for
+    anything that goes wrong once the model call has started.
 
     `analysis_block` is the optional deterministic curve pre-pass text
     (extraction/curve_prepass.py) injected into the user turn as a count anchor.
@@ -312,16 +377,18 @@ def extract(
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
     uploaded = client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf"))
+    kwargs = _message_kwargs(
+        prompt_text, uploaded.id, model=model,
+        analysis_block=analysis_block, qa_feedback=qa_feedback,
+    )
+    chain: list = []
     try:
-        kwargs = _message_kwargs(
-            prompt_text, uploaded.id, model=model,
-            analysis_block=analysis_block, qa_feedback=qa_feedback,
-        )
-        chain = _run_with_continuations(client, kwargs)
+        _run_with_continuations(client, kwargs, chain)
+        return _response_from_chain(chain)
+    except Exception as e:
+        raise _failed(e, chain) from e
     finally:
         client.beta.files.delete(uploaded.id)
-
-    return _response_from_chain(chain)
 
 
 # --------------------------------------------------------------------------- #
@@ -435,8 +502,9 @@ def collect_batch_results(
             # discard every result already collected in `out`, and the retry
             # re-runs (and re-bills) the synchronous continuations that had
             # already succeeded. The error is not swallowed: it is returned as
-            # this paper's value and surfaced in the review queue.
-            out[result.custom_id] = e
+            # this paper's value (with the usage billed so far, batch turn
+            # included) and surfaced in the review queue.
+            out[result.custom_id] = _failed(e, chain)
     return out
 
 

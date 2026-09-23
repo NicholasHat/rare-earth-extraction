@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from extraction import runner
-from extraction.anthropic_client import BatchRequest
+from extraction.anthropic_client import BatchRequest, ExtractResponse, ExtractionFailed
 from extraction.runner import BatchItem
 
 
@@ -61,7 +61,7 @@ def test_collect_batch_isolates_a_paper_whose_postprocess_raises():
     paper must not discard the papers already parsed in the same pass."""
     items = {"sha_bad": _item("sha_bad"), "sha_ok": _item("sha_ok")}
     file_ids = {"sha_bad": "file_1", "sha_ok": "file_2"}
-    raw = {"sha_bad": object(), "sha_ok": object()}
+    raw = {sha: ExtractResponse("{}", 1, 2, 3, 4) for sha in ("sha_bad", "sha_ok")}
 
     def _fake_postprocess(response, **kw):
         if response is raw["sha_bad"]:
@@ -74,7 +74,13 @@ def test_collect_batch_isolates_a_paper_whose_postprocess_raises():
         mock_load.return_value.text = "PROMPT TEXT"
         out = runner.collect_batch("batch_1", items, file_ids)
 
-    assert isinstance(out["sha_bad"], ValueError)
+    # The bad paper's call was billed; the failure says so and keeps the cause.
+    assert isinstance(out["sha_bad"], ExtractionFailed)
+    assert isinstance(out["sha_bad"].cause, ValueError)
+    assert out["sha_bad"].usage == {
+        "input_tokens": 1, "output_tokens": 2,
+        "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4,
+    }
     assert out["sha_ok"] == "parsed-ok"
 
 

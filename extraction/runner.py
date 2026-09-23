@@ -157,15 +157,19 @@ def extract_paper(
         bundle.text, pdf_bytes, model=model,
         analysis_block=analysis_block or None, qa_feedback=qa_feedback,
     )
-    return _postprocess(
-        response,
-        figure_is_curve=figure_is_curve,
-        deterministic_counts=deterministic_counts,
-        analysis_block=analysis_block,
-        prompt_version=bundle.version,
-        prompt_sha256=bundle.sha256,
-        model=model,
-    )
+    try:
+        return _postprocess(
+            response,
+            figure_is_curve=figure_is_curve,
+            deterministic_counts=deterministic_counts,
+            analysis_block=analysis_block,
+            prompt_version=bundle.version,
+            prompt_sha256=bundle.sha256,
+            model=model,
+        )
+    except Exception as e:
+        # The call succeeded and was billed; a parse/QA failure must still say so.
+        raise anthropic_client.ExtractionFailed(e, response.usage()) from e
 
 
 # --------------------------------------------------------------------------- #
@@ -296,7 +300,7 @@ def collect_batch(
             # does parsing, schema coercion and QA, and anything it raises for
             # ONE paper must not discard the papers already parsed above (a
             # re-collect re-bills any synchronous continuations that succeeded).
-            out[custom_id] = e
+            out[custom_id] = anthropic_client.ExtractionFailed(e, raw.usage())
     return out
 
 

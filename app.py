@@ -22,7 +22,6 @@ import auth
 import config
 from database import connection, merge, naming, papers_repo
 from extraction import runner, staging
-from extraction.parse_output import ParseError
 from extraction.prompt_loader import PromptNotReadyError
 from extraction.runner import ExtractionResult
 from extraction.staging import BatchJob, PaperRef, StagedPaper
@@ -122,10 +121,8 @@ def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
             except PromptNotReadyError as e:
                 errors.append((p.paper.filename, f"Prompt not ready: {e}"))
                 continue
-            except ParseError as e:
-                errors.append((p.paper.filename, f"Could not parse model output: {e}"))
-                continue
-            except Exception as e:  # API/auth/etc. — record and keep going
+            except Exception as e:  # API/parse/QA — money may have been spent: log it, keep going
+                staging.record_failed_run(p.paper, e)
                 errors.append((p.paper.filename, f"Extraction failed: {e}"))
                 continue
             # Persist before touching Streamlit again. Closing the status box
@@ -198,6 +195,7 @@ def _collect_batch_job(job: BatchJob) -> None:
     errors: dict[str, str] = {}
     for sha, result in results.items():
         if isinstance(result, Exception):
+            staging.record_failed_run(job.papers[sha], result)
             errors[sha] = str(result)
             continue
         staging.stage(job.papers[sha], job.items[sha].figure_is_curve, result)
@@ -212,6 +210,32 @@ def _collect_batch_job(job: BatchJob) -> None:
     if n_ok:
         st.success(
             f"Batch {job.batch_id}: {n_ok}/{len(results)} paper(s) extracted — ready for review below."
+        )
+
+
+def render_failed_runs() -> None:
+    """Extractions that failed after spending API money, newest first — the
+    only record of what such a run cost (staging.record_failed_run)."""
+    failed = staging.load_failed_runs()
+    if not failed:
+        return
+    with st.expander(f"Failed runs ({len(failed)} most recent)"):
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "When": f["at"],
+                        "File": f["filename"],
+                        "Error": f["error"],
+                        **{k: (f.get("usage") or {}).get(k) for k in (
+                            "input_tokens", "output_tokens",
+                            "cache_creation_input_tokens", "cache_read_input_tokens",
+                        )},
+                    }
+                    for f in failed
+                ]
+            ),
+            width="stretch", hide_index=True,
         )
 
 
@@ -474,6 +498,7 @@ def render_review_queue() -> None:
                     qa_feedback=feedback,
                 )
             except Exception as e:
+                staging.record_failed_run(paper, e)
                 st.error(f"Re-extraction failed (previous staged result kept): {e}")
                 st.stop()
             staging.stage(paper, staged.figure_is_curve, new_result)  # before the spinner closes — see _run_batch
@@ -494,6 +519,7 @@ def main() -> None:
         st.info("Upload one or more PDFs to begin.")
         render_batch_jobs()
         render_review_queue()
+        render_failed_runs()
         return
 
     conn = connection.get_conn()
@@ -598,6 +624,7 @@ def main() -> None:
 
     render_batch_jobs()
     render_review_queue()
+    render_failed_runs()
 
 
 # Streamlit executes this module top-to-bottom on every interaction.

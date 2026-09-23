@@ -181,7 +181,11 @@ def test_collect_batch_results_isolates_a_failed_continuation():
         mock_anthropic.return_value = client
         out = collect_batch_results("batch_1", requests, file_ids)
 
-    assert isinstance(out["sha_paused"], _NotARuntimeError)
+    assert isinstance(out["sha_paused"], anthropic_client.ExtractionFailed)
+    assert isinstance(out["sha_paused"].cause, _NotARuntimeError)
+    # The batch turn was billed even though its continuation failed.
+    assert out["sha_paused"].usage["output_tokens"] == 20
+    assert out["sha_paused"].turns_completed == 1
     assert out["sha_ok"].text == "all good"
 
 
@@ -273,3 +277,69 @@ def test_batch_request_carries_qa_feedback_into_the_user_turn():
 
     without = BatchRequest("sha1", "prompt", "claude-sonnet-5").message_kwargs("file_1")
     assert [b["type"] for b in without["messages"][0]["content"]] == ["document", "container_upload", "text"]
+
+
+# --------------------------------------------------------------------------- #
+# A failed run reports what it cost (ExtractionFailed)
+# --------------------------------------------------------------------------- #
+def _usage(**kw):
+    base = dict(input_tokens=0, output_tokens=0, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+    return SimpleNamespace(**{**base, **kw})
+
+
+def test_extract_reports_usage_of_completed_turns_and_the_dying_stream():
+    """A run that pauses once, then dies mid-way through its continuation,
+    must account for the completed turn AND the partial message the dying
+    stream had accumulated — that is the money the failure cost."""
+    paused = _msg("pause_turn", "partial", usage=_usage(output_tokens=1000, cache_read_input_tokens=50_000))
+    partial = SimpleNamespace(stop_reason=None, content=[], usage=_usage(output_tokens=300, cache_read_input_tokens=70_000))
+
+    calls = iter([("ok", paused), ("die", partial)])
+
+    def _stream(**kwargs):
+        mode, message = next(calls)
+        cm = MagicMock()
+        inner = cm.__enter__.return_value
+        if mode == "ok":
+            inner.get_final_message.return_value = message
+        else:
+            inner.get_final_message.side_effect = _NotARuntimeError("credit balance too low")
+            inner.current_message_snapshot = message
+        return cm
+
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = MagicMock()
+        client.beta.messages.stream.side_effect = _stream
+        client.beta.files.upload.return_value.id = "file_1"
+        mock_anthropic.return_value = client
+        with pytest.raises(anthropic_client.ExtractionFailed) as exc:
+            anthropic_client.extract("prompt", b"%PDF", model="claude-sonnet-5")
+
+    err = exc.value
+    assert isinstance(err.cause, _NotARuntimeError)
+    assert err.usage == {
+        "input_tokens": 0, "output_tokens": 1300,
+        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 120_000,
+    }
+    assert err.turns_completed == 1                 # the partial message is not a completed turn
+    assert "1,300 out" in str(err) and "credit balance too low" in str(err)
+    client.beta.files.delete.assert_called_once_with("file_1")   # cleanup still happens
+
+
+def test_extract_wraps_a_bad_final_stop_reason_with_its_full_usage():
+    """max_tokens after a whole run is a paid failure too."""
+    truncated = _msg("max_tokens", "...", usage=_usage(output_tokens=128_000))
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        client = _fake_client([truncated])
+        client.beta.files.upload.return_value.id = "file_1"
+        mock_anthropic.return_value = client
+        with pytest.raises(anthropic_client.ExtractionFailed) as exc:
+            anthropic_client.extract("prompt", b"%PDF", model="claude-sonnet-5")
+    assert "max_tokens" in str(exc.value.cause)
+    assert exc.value.usage["output_tokens"] == 128_000
+    assert exc.value.turns_completed == 1
+
+
+def test_partial_message_is_ignored_when_the_stream_never_started():
+    """A MagicMock stream (or the SDK before message_start) has no real usage."""
+    assert anthropic_client._partial_message(MagicMock()) is None

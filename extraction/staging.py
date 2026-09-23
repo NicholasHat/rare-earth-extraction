@@ -8,6 +8,8 @@ never loses an extraction that already cost API money:
                              reviewer edits)
   <sha>.meta.json            everything else about that staged paper
   _batch_<id>.batch.json     a submitted-but-not-yet-collected Batches API job
+  _failed_runs.jsonl         append-only log of extractions that failed after
+                             spending API money (what failed, tokens billed)
 
 Pure file I/O — no Streamlit, no DB — so it is unit-testable and app.py stays
 a thin UI layer over it. Sidecar layouts are flat JSON, and loading tolerates
@@ -145,6 +147,41 @@ def load_all() -> dict[str, StagedPaper]:
 # against that second attempt; the staleness window lets it self-heal if a
 # prior attempt crashed without clearing it.
 COLLECTION_LOCK_STALE_AFTER = timedelta(minutes=10)
+
+
+def _failed_runs_path():
+    return config.STAGING_DIR / "_failed_runs.jsonl"
+
+
+def record_failed_run(paper: PaperRef, error: Exception) -> None:
+    """Append one failed extraction to the failed-runs log. Money was spent and
+    nothing was staged, so this is the attempt's only record: what failed and,
+    for an anthropic_client.ExtractionFailed, the tokens billed before it did."""
+    config.ensure_dirs()
+    entry = {
+        "at": _now_iso(),
+        "sha": paper.sha,
+        "filename": paper.filename,
+        "error": str(error),
+        "usage": getattr(error, "usage", None),
+        "turns_completed": getattr(error, "turns_completed", None),
+    }
+    with _failed_runs_path().open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def load_failed_runs(limit: int = 10) -> list[dict]:
+    """The most recent failed runs, newest first (corrupt lines skipped)."""
+    path = _failed_runs_path()
+    if not path.exists():
+        return []
+    entries: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    return entries[::-1][:limit]
 
 
 def _now_iso() -> str:
