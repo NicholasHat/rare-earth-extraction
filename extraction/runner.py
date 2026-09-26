@@ -130,11 +130,11 @@ def must_use_batch(paper_meta: dict) -> bool:
     Raster-figure papers are. Their code-execution loop runs far longer than a
     vector paper's (Quinn et al. 2015 was still digitizing after 51 iterations
     under extraction_v9), and every iteration re-reads the whole growing
-    transcript, so cost grows faster than the loop does. The synchronous path
-    makes that worse twice over: it pauses every 10 iterations and re-writes
-    the transcript to cache on each continuation, and it gives up after
-    _MAX_CONTINUATIONS — throwing the whole spend away (2026-09-22: ~$7.50 for
-    nothing). Batch requests are half price and get a higher iteration cap.
+    transcript, so cost grows faster than the loop does. Batch requests are
+    half price for the same 50-iteration turn, and the first turn runs on
+    Anthropic's side, so it survives the browser session or the laptop going
+    away; the synchronous path holds one streamed connection per turn for as
+    long as the loop runs (2026-09-22: a ~$7.50 synchronous run).
     `paper_meta` is ingestion.pdf_inspect.inspect()'s dict.
     """
     return bool(paper_meta.get("is_raster_figure"))

@@ -14,14 +14,17 @@ Two ways to run an extraction, sharing the same request shape (_message_kwargs):
     multi-figure extraction plus the code-execution transcript is a large
     output; non-streaming would risk the SDK's HTTP timeout). Automatically
     resumes through `stop_reason="pause_turn"` (the server-side code-execution
-    loop's default 10-internal-iteration cap) by re-sending the assistant's
-    own partial response, per the documented continuation pattern — a rich
-    multi-element paper can legitimately need more than 10 iterations.
+    loop's per-turn iteration cap) by re-sending the assistant's own partial
+    response, per the documented continuation pattern.
   - `submit_batch()` / `poll_batch_status()` / `collect_batch_results()` — the
-    Message Batches API, 50% cheaper and asynchronous. Gets a higher per-turn
-    iteration cap than the sync path, so most papers never pause here; a
-    `pause_turn` result is transparently finished off with a synchronous
-    continuation (`_continue_until_done`) rather than surfaced as an error.
+    Message Batches API, 50% cheaper and asynchronous. A `pause_turn` result is
+    transparently finished off with a synchronous continuation
+    (`_continue_until_done`) rather than surfaced as an error.
+
+Both paths pause at the same cap: 50 code-execution iterations per turn,
+measured on Sonnet 5 (a synchronous turn paused after 50 tool calls on
+2026-09-25; batch items paused at 50 on 2026-09-16 and 2026-09-24). Older
+notes here said 10 for sync and "higher" for batch — neither holds.
 
 `_continue_until_done` also resumes through `stop_reason="tool_use"`: the only
 tool offered is server-side, so a client-side tool call can only be the model
@@ -303,9 +306,9 @@ def _partial_message(stream):
 
 
 # Server-side tool loops (code execution) pause with stop_reason="pause_turn"
-# after a default 10 internal iterations. Bound how many times we resend and
-# let it resume — a rich multi-element paper can legitimately need several
-# rounds of this; an unbounded loop would not.
+# after 50 iterations in one turn (measured; see the module docstring). Bound
+# how many times we resend and let it resume — a demanding paper can need
+# more than one turn; an unbounded loop would not.
 _MAX_CONTINUATIONS = 5
 
 
@@ -447,10 +450,9 @@ def _upload_toolkit(client: anthropic.Anthropic):
 
 # --------------------------------------------------------------------------- #
 # Message Batches API — 50% cheaper token pricing; asynchronous (usually
-# minutes, up to 24h). Gets a HIGHER per-turn server-side-tool-loop iteration
-# cap than the synchronous path before pausing (Anthropic's docs), so most
-# papers never hit pause_turn here at all; the rare one that does is finished
-# off synchronously — see collect_batch_results.
+# minutes, up to 24h). Same 50-iteration per-turn cap as the synchronous path
+# (measured); an item that pauses is finished off synchronously — see
+# collect_batch_results.
 #
 # Code execution + Files API document blocks + task budgets inside a batched
 # request was verified live on 2026-07-29 (~$2.26/paper on Sonnet 5, ~96%
@@ -532,9 +534,8 @@ def collect_batch_results(
     paper doesn't lose the rest of the batch.
 
     A paused item (stop_reason=pause_turn, or a misspelled tool call — see
-    _resumable) is NOT treated as a terminal failure: batch requests get a
-    HIGHER per-turn iteration cap than synchronous ones, so pausing anyway
-    means a genuinely demanding paper.
+    _resumable) is NOT treated as a terminal failure: it has used a full
+    50-iteration turn, the mark of a genuinely demanding paper.
     Anthropic's docs confirm a paused batch item can be continued via either
     a new batch request or a synchronous one — we use the latter (the same
     `_continue_until_done` the sync `extract()` path uses), so only the rare
