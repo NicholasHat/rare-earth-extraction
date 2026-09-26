@@ -124,9 +124,11 @@ class CurvePrepass:
                 howmany = (f"with {min(fp.series_counts)}–{max(fp.series_counts)} markers each "
                            f"(counts {fp.series_counts})")
             lines.append(
-                f"- **Page {fp.page_index} (authoritative):** {n} distinct data series, "
+                f"- **Page {fp.page_index} (authoritative):** {n} filled-marker data series, "
                 f"{howmany}. This is ground truth from the figure's drawing commands — "
-                f"every series must yield this many rows. A lower row count means you "
+                f"every one of these series must yield this many rows. Series drawn with "
+                f"outline or stroked markers are not counted here, so the legend may list "
+                f"more; digitise those too. A lower row count means you "
                 f"under-digitised (likely missed points in a dense transition zone); go "
                 f"back and capture them. Use the legend to map series → element."
             )

@@ -4,7 +4,37 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v11 — the sandbox toolkit replaces hand-written raster digitisers (current pinned default)
+## extraction_v12 — digitise the markers the figure has, no more; state only what is true of the sandbox (current pinned default)
+- **No point-count target.** v5–v11 said "~10–20 points per element … that is the
+  target" in five places. Quinn et al. 2015's series have 5–7 markers, and the
+  extraction_v10 run returned 13 evenly spaced points per series sampled off the
+  fitted lines (see `validation/checks.py` `sampled_from_line`, which now rejects
+  that). The target is now the figure's own marker count, with an explicit rule
+  never to sample points along a fitted or guide line; Step 10, rule 7 and the
+  pitfalls table say the same, plus a new pitfalls row.
+- **The model cannot see sandbox renders.** Step 2 said to "render the page and
+  look at it"; renders are never shown to the model, and opening a PNG with the
+  file viewer returns base64 into the transcript. Visual reading now points at the
+  PDF document; a pitfalls row names the file-viewer trap; the estimate-page
+  guidance no longer suggests re-rendering to check.
+- **PyMuPDF, not pdfplumber.** Step 4's snippet and marker descriptions used
+  pdfplumber's `page.curves` / `page.lines`, which does not import in the sandbox;
+  they now use `page.get_drawings()`.
+- **Raster render scale.** Step 2 says to render the pre-pass bbox at 300 dpi (the
+  toolkit's scale) and not to re-render at another — the v11 run re-rendered at
+  native resolution mid-figure. Step 3 notes corner ticks are not returned.
+- **Counts are filled-marker only.** The deterministic section now says the
+  authoritative counts cover filled-marker series and the legend may list more
+  (Swain & Otu Fig. 2: 9 counted, 14 in the legend). The pre-pass block says the
+  same.
+- **Dead text removed:** the v4-era "What changed" preamble (history lives here)
+  and the v8 `DIGITIZED CURVE DATA` subsection, now one line deferring to the
+  block's own instructions — the block has never fired on a real paper
+  (`calibrate.auto_ticks` reads no axis on either validation paper).
+- Everything else is unchanged from v11. ~5% shorter.
+- (Not yet validated live — no `prompt_runs` record exists for this version.)
+
+## extraction_v11 — the sandbox toolkit replaces hand-written raster digitisers
 - Companion to `extraction/sandbox_toolkit.py`: the repository's tested
   `curve_extractor` package now rides into the code-execution sandbox next to
   the PDF, described by a per-run "SANDBOX TOOLKIT" user-turn block (injected

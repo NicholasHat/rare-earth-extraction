@@ -8,7 +8,7 @@ A Streamlit web app that turns rare-earth-element (REE) solvent-extraction resea
 
 Two design documents, referenced by section number throughout the code:
 
-- `plan.md` is the original pre-implementation design plan — authoritative on *intent*. Code comments saying `README §6` etc. refer to **plan.md's** sections (the plan used to live in README.md; README.md is now a public-facing overview with no section numbers). The code has moved past the plan in places (e.g. the pinned prompt is now `extraction_v11`, not `extraction_v5.1`). Trust the code for current behavior; use the plan for rationale.
+- `plan.md` is the original pre-implementation design plan — authoritative on *intent*. Code comments saying `README §6` etc. refer to **plan.md's** sections (the plan used to live in README.md; README.md is now a public-facing overview with no section numbers). The code has moved past the plan in places (e.g. the pinned prompt is now `extraction_v12`, not `extraction_v5.1`). Trust the code for current behavior; use the plan for rationale.
 - `docs/curve_extractor_plan.md` is the deterministic curve extractor's design doc — comments saying `plan §4.2` etc. refer to *its* sections.
 
 ## Commands
@@ -27,7 +27,7 @@ There is no lint/format config and no `pytest.ini` — `conftest.py` just puts t
 
 ## Environment
 
-Config is read once in `config.py` from `.env` at the repo root. Keys: `ANTHROPIC_API_KEY` (required for extraction/assistant, not for tests), `REQUIRE_PASSWORD`/`WRITE_PASSWORD` (write gate), `EXTRACTION_PROMPT_VERSION` (default `extraction_v11`), `EXTRACTION_MODEL` (default `claude-sonnet-5` — same tool support as Opus 4.8 for this pipeline: code execution, Files API, task budgets, 1h cache TTL, batches, and the same 2576px high-resolution vision tier that figure digitization depends on), `ASSISTANT_MODEL` (`claude-haiku-4-5-...`), `EXTRACTION_EFFORT` (empty by default = API default `high`; `output_config.effort`, the lever after loop length since thinking is ~3/4 of output tokens — A/B on Swain before changing it), `EXTRACTION_TASK_BUDGET_TOKENS` (default `500000` — a self-moderated backstop on total tokens per extraction call, not a hard cap; keep it generous, a too-tight budget makes the model silently under-digitize a multi-element paper instead of erroring). Never hardcode paths or model IDs — add them to `config.py`.
+Config is read once in `config.py` from `.env` at the repo root. Keys: `ANTHROPIC_API_KEY` (required for extraction/assistant, not for tests), `REQUIRE_PASSWORD`/`WRITE_PASSWORD` (write gate), `EXTRACTION_PROMPT_VERSION` (default `extraction_v12`), `EXTRACTION_MODEL` (default `claude-sonnet-5` — same tool support as Opus 4.8 for this pipeline: code execution, Files API, task budgets, 1h cache TTL, batches, and the same 2576px high-resolution vision tier that figure digitization depends on), `ASSISTANT_MODEL` (`claude-haiku-4-5-...`), `EXTRACTION_EFFORT` (empty by default = API default `high`; `output_config.effort`, the lever after loop length since thinking is ~3/4 of output tokens — A/B on Swain before changing it), `EXTRACTION_TASK_BUDGET_TOKENS` (default `500000` — a self-moderated backstop on total tokens per extraction call, not a hard cap; keep it generous, a too-tight budget makes the model silently under-digitize a multi-element paper instead of erroring). Never hardcode paths or model IDs — add them to `config.py`.
 
 ## Architecture: three pillars over one DB
 

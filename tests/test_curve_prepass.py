@@ -47,7 +47,7 @@ def test_prompt_block_marks_authoritative_and_raster():
     )
     block = p.to_prompt_block()
     assert "Page 2 (authoritative)" in block
-    assert "9 distinct data series" in block and "19 digitised markers" in block
+    assert "9 filled-marker data series" in block and "legend may list more" in block and "19 digitised markers" in block
     assert "verify visually" in block
     # Raster pages name the figure's bbox so the model renders straight to it.
     assert "Page 0 (raster image)" in block and "(10.0, 20.5, 300.0, 400.2) pt" in block
