@@ -1,6 +1,7 @@
 """Tests for the digitisation toolkit shipped into the code-execution sandbox
 (extraction/sandbox_toolkit.py): the bundle must load where pdfplumber and
-scikit-image are absent, and the guide must describe functions that exist."""
+scikit-image are absent, and the guide must describe functions that exist and
+state the sandbox's facts truthfully."""
 import importlib
 import io
 import re
@@ -26,7 +27,8 @@ def test_bundle_is_deterministic_and_holds_the_package():
 def sandbox(tmp_path, monkeypatch):
     """The bundle unpacked into a bare directory, imported as the sandbox would
     import it: top-level `curve_extractor`, with pdfplumber and scikit-image
-    unavailable (their absence is the sandbox's documented state)."""
+    unavailable (pdfplumber fails to import in the sandbox; scikit-image is
+    installed there but the package must not depend on it)."""
     zipfile.ZipFile(io.BytesIO(sandbox_toolkit.bundle())).extractall(tmp_path)
     monkeypatch.syspath_prepend(str(tmp_path))
     for name in ("pdfplumber", "skimage", "skimage.feature"):
@@ -64,3 +66,11 @@ def test_guide_names_only_functions_that_exist():
         assert callable(getattr({"raster": raster, "calibrate": calibrate}[module], fn)), f"{module}.{fn}"
     assert sandbox_toolkit.FILENAME in guide
     assert "pdfplumber" in guide and "fitz" in guide     # the environment facts the model used to probe for
+
+
+def test_guide_never_tells_the_model_to_install_or_view_images():
+    guide = sandbox_toolkit.guide()
+    assert "pip install" not in guide          # the sandbox has no internet
+    assert "no internet" in guide
+    assert "cannot see images" in guide        # renders are never shown to the model
+    assert "look at it" not in guide

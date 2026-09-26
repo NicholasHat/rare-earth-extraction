@@ -3,9 +3,11 @@
 Gives Claude the paper PDF two ways in the same turn: a `document` block (so
 it can visually read the figure — legend colours, marker shapes, panel
 layout) and a `container_upload` (so the code-execution tool can open the
-same file with pdfplumber/numpy for vector/raster detection, axis
-calibration, and point digitization, per the prompt's Steps 2-6). Both need
-the PDF uploaded once via the Files API first.
+same file with PyMuPDF/numpy for vector/raster detection, axis calibration,
+and point digitization, per the prompt's Steps 2-6). Both need the PDF
+uploaded once via the Files API first. The model sees figures only through
+the document block: images it renders inside the sandbox are pixels for its
+code, never shown to it.
 
 Two ways to run an extraction, sharing the same request shape (_message_kwargs):
   - `extract()` — synchronous, streamed (a fully-digitized multi-element,
@@ -153,13 +155,21 @@ def _check_stop_reason(stop_reason: str, *, can_continue: bool = False) -> None:
     )
 
 # A short instruction in the user turn; the real rules live in the system prompt.
+# It states the sandbox facts a model otherwise spends iterations discovering
+# (checked live 2026-09-25): the PDF's path, PyMuPDF works, pdfplumber does
+# not import, there is no internet, and a rendered image is never shown to it
+# (opening a PNG with the file viewer returns base64 text that every later
+# iteration re-reads).
 _USER_INSTRUCTION = (
     "Extract the data from this paper according to your instructions. The same "
-    "PDF is also available in your code execution environment — list the "
-    "working directory to find it, install any package you need, and use "
-    "pdfplumber/numpy there for axis calibration and point digitization as "
-    "Steps 2-6 describe. Return only the single JSON object described in the "
-    "OUTPUT CONTRACT."
+    "PDF is also in your code execution environment at $INPUT_DIR/paper.pdf — "
+    "open it with PyMuPDF (`import fitz`) and use numpy there for axis "
+    "calibration and point digitization as Steps 2-6 describe. The sandbox has "
+    "no internet access, so nothing can be installed, and pdfplumber does not "
+    "import there. You cannot see images you create in the sandbox: read "
+    "figures (legend, marker shapes, panel layout, in-plot text) from the PDF "
+    "document above, and never open an image file with the file viewer. "
+    "Return only the single JSON object described in the OUTPUT CONTRACT."
 )
 
 

@@ -13,8 +13,9 @@ injected like the curve pre-pass block — never folded into the pinned prompt.
 
 The guide is the contract between this code and the prompt: it names the
 functions the prompt's raster steps tell the model to call, and states the
-sandbox facts the model otherwise probes for (PyMuPDF works there; pdfplumber
-may not import; scikit-image is optional).
+sandbox facts the model otherwise probes for (checked live 2026-09-25: PyMuPDF
+1.21, numpy, scipy, PIL, scikit-image and OpenCV work; pdfplumber does not
+import; there is no internet, so nothing can be installed).
 """
 from __future__ import annotations
 
@@ -55,10 +56,12 @@ unzip -oq "$INPUT_DIR/{FILENAME}" -d /tmp/toolkit && ls "$INPUT_DIR"/*.pdf
 import sys; sys.path.insert(0, "/tmp/toolkit")
 from curve_extractor import raster, calibrate
 ```
-**Environment facts — do not probe or reinstall:** PyMuPDF (`import fitz`), numpy, scipy and PIL are
-installed and work. `pdfplumber` may fail to import here; do not repair it — render with PyMuPDF.
-scikit-image is optional: without it the toolkit skips only its template-matching recovery pass
-(`pip install scikit-image` if a crowded figure needs it).
+**Environment facts — do not probe or reinstall:** PyMuPDF (`import fitz`), numpy, scipy, PIL,
+scikit-image and OpenCV are installed and work. `pdfplumber` does not import here; do not repair it —
+render with PyMuPDF. There is no internet access, so nothing can be installed.
+**You cannot see images you create here.** A render is pixels for your code only; opening a PNG
+with the file viewer returns base64 text that every later step re-reads. Read legends, marker
+shapes, panel layout and in-plot text from the PDF document in this conversation.
 
 **Render a figure region** (the DETERMINISTIC CURVE ANALYSIS block gives each raster page's figure
 bbox in PDF points, origin top-left, same convention as `fitz.Rect`):
@@ -84,9 +87,9 @@ the page) and run everything below per panel; pixel coordinates are then relativ
   (`filled_square` / `filled_circle` / `filled_triangle` / `filled_diamond` / `stroked_glyph` /
   `ambiguous`), `marker_type`, `pixel_x`, `pixel_y`. **Blank the legend and every in-plot text region
   first** (`arr[y0:y1, x0:x1] = 255`) — the toolkit does not know where they are; you do, from the
-  rendered page. Map shape family → element from the legend, as always.
+  PDF document. Map shape family → element from the legend, as always.
 
-**Budget per raster figure: about three code runs** — (1) render and look at it, (2) blank text regions
-+ detect markers + frame + ticks, (3) calibrate, convert, assign series. Do not re-implement any of the
+**Budget per raster figure: about three code runs** — (1) render the region and print its size and
+frame, (2) blank text regions + detect markers + ticks, (3) calibrate, convert, assign series. Do not re-implement any of the
 above, do not iterate on clustering tolerances, and do not re-render a panel to re-confirm a count.
 """

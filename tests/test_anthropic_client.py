@@ -424,3 +424,9 @@ def test_effort_is_sent_only_when_configured():
         kw = anthropic_client._message_kwargs("p", "file_pdf", model="m", analysis_block=None)
     assert kw["output_config"]["effort"] == "medium" and "task_budget" in kw["output_config"]
 
+
+def test_user_instruction_states_the_sandbox_facts_instead_of_inviting_probes():
+    text = anthropic_client._USER_INSTRUCTION
+    assert "$INPUT_DIR/paper.pdf" in text and "fitz" in text
+    assert "install any" not in text and "list the working directory" not in text
+    assert "no internet" in text and "cannot see images" in text

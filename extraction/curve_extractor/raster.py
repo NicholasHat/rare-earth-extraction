@@ -22,7 +22,8 @@ The image-level entry points (`find_frame`, `tick_pixels`, `detect_markers_in_im
 take a plain grayscale array, so they run unchanged inside the model's
 code-execution sandbox, where this package is shipped as a toolkit
 (extraction/sandbox_toolkit.py) and the page is rendered with whatever PDF
-library that sandbox has; scikit-image is optional there (see _template_tools).
+library that sandbox has. scikit-image is installed there, but stays an optional
+import so the package still loads wherever it is missing (see _template_tools).
 """
 from __future__ import annotations
 
@@ -75,8 +76,8 @@ _TICK_MAX_WIDTH_PX = 4
 
 
 def _template_tools():
-    """scikit-image is optional: absent in the model's code-execution sandbox
-    unless installed, so the recovery pass degrades to a warning there."""
+    """scikit-image is an optional import: where it is missing, the recovery
+    pass degrades to a warning instead of the package failing to load."""
     from skimage.feature import match_template, peak_local_max
     return match_template, peak_local_max
 
@@ -291,8 +292,8 @@ def _recover_missed_markers(
     try:
         match_template, peak_local_max = _template_tools()
     except ImportError:
-        return [], ["raster: scikit-image not installed — template-matching recovery of "
-                    "overlapped markers skipped (pip install scikit-image to enable)."]
+        return [], ["raster: scikit-image not available — template-matching recovery of "
+                    "overlapped markers skipped."]
     by_family: dict[str, list[dict]] = defaultdict(list)
     for b in kept:
         mtype, family = classify_blob_shape(b)
