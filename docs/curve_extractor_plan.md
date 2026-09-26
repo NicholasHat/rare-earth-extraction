@@ -36,7 +36,10 @@ Two validation papers probed with `pdfplumber`, revealing a fork the plan only h
   + a warning and relies on the LLM-supplied tick seam (§3) — as the plan intended.
 
 **Built:** `types.py`, `calibrate.py`, `detect.py`, `markers.py` (vector, filled + stroked),
-`raster.py` (raster, scikit-image shape families + template-match recovery), `extractor.py`
+`raster.py` (raster, scikit-image shape families + template-match recovery, plus image-level
+frame and tick detection for the sandbox toolkit — axis lines on a lighter gray threshold than
+markers, frames found as a corner of two axis lines, ticks as short lines attached to an axis;
+16 of 16 Quinn et al. 2015 panels framed correctly at 300 dpi, up from 1), `extractor.py`
 (auto-routing on `is_vector`), and the `curve_prepass.py` integration (M5).
 
 **Open items:**
@@ -47,7 +50,8 @@ Two validation papers probed with `pdfplumber`, revealing a fork the plan only h
   logic. Admitting stroked series needs the §5.2 second-paper fixture first.
 - **Tick-label reading (`calibrate.auto_ticks`).** The v8 coordinate hand-off only fires when
   both axes calibrate `ok`; on pages where tick labels can't be read the pre-pass degrades to
-  counts only. Its success rate across real papers is unmeasured.
+  counts only. Measured 2026-09-25: it reads no axis on any page of Swain & Otu or Quinn, so the
+  `DIGITIZED CURVE DATA` block has never fired on a real paper.
 - **Panel-merge detection** (`curve_prepass._looks_panel_merged`) catches side-by-side panels
   via a balanced x-split; stacked panels with identical x ranges still rely on the
   count-uniformity gate alone.

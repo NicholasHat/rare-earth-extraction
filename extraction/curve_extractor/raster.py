@@ -66,12 +66,29 @@ _TRIANGLE_CENTROID_OFFSET = 0.08
 # an exemplar patch, and a correlation peak this strong to call it a marker.
 _TEMPLATE_MIN_EXEMPLARS = 4
 _TEMPLATE_MATCH_THRESHOLD = 0.6
-# Plot-frame / tick detection on the rendered region (300 dpi scale): a frame
-# line is an ink run across at least this fraction of the image; a tick is a
-# short run perpendicular to the frame edge, at most this wide.
-_FRAME_MIN_FRAC = 0.5
+# Plot-frame / tick detection on the rendered region (300 dpi scale). Axis
+# lines and ticks are judged on a lighter threshold than markers: a scanned
+# figure's thin lines are JPEG gray (~145 on Quinn et al. 2015), well above
+# the marker threshold, while its markers stay near black. An axis line is a
+# near-continuous run at least _FRAME_MIN_FRAC of the region long (see
+# find_frame for how they make a frame): a gap of up to _LINE_MAX_GAP px is
+# bridged (JPEG speckle), and each pixel row/column is OR-ed with its
+# neighbour so a 1-px line antialiased across two pixel rows still reads as
+# one. The bottom axis may start up to _AXIS_START_TOL of the region's width
+# right of the left axis: hollow markers drawn over the corner blank that
+# stretch with their white fill (69 px on Quinn et al. 2015 Fig. 2, panel 4).
+# Bridging that inside the line instead would weld tick labels onto the axes.
+# A tick is a line at least _TICK_MIN_LEN_PX long attached to the axis line,
+# at most _TICK_MAX_WIDTH_PX wide (Quinn et al. 2015's run ~10 px; a gridline
+# lying along the axis is 2-3 px thick).
+_LINE_THRESHOLD = 200
+_LINE_MAX_GAP = 2
+_AXIS_START_TOL = 0.15
+_FRAME_MIN_FRAC = 0.3
+_FRAME_END_TOL = 0.03
+_EDGE_FILL_FRAC = 0.5        # share of a frame edge row/column that is ink while still on the line
 _TICK_BAND_PX = 15
-_TICK_MIN_LEN_PX = 3
+_TICK_MIN_LEN_PX = 5
 _TICK_MAX_WIDTH_PX = 4
 
 
@@ -95,18 +112,84 @@ def _ink_mask(arr: np.ndarray) -> np.ndarray:
     return arr < _DARK_THRESHOLD
 
 
+def _line_mask(arr: np.ndarray) -> np.ndarray:
+    return arr < _LINE_THRESHOLD
+
+
+def _runs(line: np.ndarray) -> list[tuple[int, int]]:
+    """(start, end) of each run of True in a 1-D mask, bridging gaps of up to
+    _LINE_MAX_GAP pixels."""
+    idx = np.flatnonzero(line)
+    if not len(idx):
+        return []
+    breaks = np.flatnonzero(np.diff(idx) > _LINE_MAX_GAP + 1)
+    starts = idx[np.r_[0, breaks + 1]]
+    ends = idx[np.r_[breaks, len(idx) - 1]]
+    return list(zip(starts.tolist(), ends.tolist()))
+
+
+def _segments(mask: np.ndarray, min_len: float) -> list[tuple[int, int, int]]:
+    """Near-continuous line segments along axis 0 of `mask` as (index, start,
+    end): one per run of at least `min_len` in each row. Each row is OR-ed with
+    the next so an antialiased line split across two rows still counts."""
+    band = mask.copy()
+    band[:-1] |= mask[1:]
+    return [
+        (i, s, e) for i, row in enumerate(band) for s, e in _runs(row)
+        # the row must carry part of the run itself, or the row just above a
+        # solid line would read as a line too
+        if e - s + 1 >= min_len and mask[i, s:e + 1].mean() >= 0.25
+    ]
+
+
+def _merge(segments: list[tuple[int, int, int]], tol: float) -> list[tuple[int, int, int, int]]:
+    """Merge segments on adjacent indices with matching ends (one thick or
+    antialiased line) into (first index, last index, start, end)."""
+    merged: list[list[int]] = []
+    for i, s, e in sorted(segments):
+        for m in merged:
+            if i - m[1] <= 2 and abs(s - m[2]) <= tol and abs(e - m[3]) <= tol:
+                m[1], m[2], m[3] = i, min(m[2], s), max(m[3], e)
+                break
+        else:
+            merged.append([i, i, s, e])
+    return [tuple(m) for m in merged]
+
+
 def find_frame(arr: np.ndarray) -> tuple[int, int, int, int] | None:
-    """The plot frame of a rendered single-panel figure region as pixel
-    (x0, top, x1, bottom): the outermost rows and columns whose ink run spans
-    at least half the image. None when no such lines exist. For a multi-panel
-    figure, crop to one panel first — this finds the outer box otherwise."""
-    ink = _ink_mask(arr)
-    h, w = ink.shape
-    rows = np.nonzero(ink.sum(axis=1) >= _FRAME_MIN_FRAC * w)[0]
-    cols = np.nonzero(ink.sum(axis=0) >= _FRAME_MIN_FRAC * h)[0]
-    if len(rows) < 2 or len(cols) < 2 or rows[-1] - rows[0] < 10 or cols[-1] - cols[0] < 10:
-        return None
-    return int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1])
+    """The plot frame of a rendered figure region as pixel (x0, top, x1,
+    bottom), outer edges of the axis lines: a vertical left axis and the lowest
+    horizontal line that starts at it within its extent, i.e. the plot's
+    corner. A closed box and an open L-shaped pair of axes both qualify; the
+    right edge is where the bottom axis ends, the top where the left axis
+    starts (or a top line, if higher). The largest such frame wins, so a crop
+    that also catches part of a neighbouring panel still returns this panel's
+    frame. Robust to JPEG-gray lines, to a 1-px line antialiased across two
+    pixel rows, to axis lines overhanging the corner where an outside tick sits
+    on them, and to dotted gridlines, which never form a near-continuous run.
+    None when no such corner exists. For a multi-panel figure, crop to one
+    panel (with its tick labels) first."""
+    lines = _line_mask(arr)
+    h, w = lines.shape
+    tol = _FRAME_END_TOL * h
+    verticals = _merge(_segments(lines.T, _FRAME_MIN_FRAC * h), tol)
+    horizontals = _merge(_segments(lines, _FRAME_MIN_FRAC * w), _FRAME_END_TOL * w)
+    best, best_area = None, 0
+    for v in verticals:
+        v_first, v_last, v_top, v_bottom = v
+        axes = [hz for hz in horizontals
+                if v_top - tol <= hz[0] and hz[1] <= v_bottom + tol    # within the axis' extent
+                and hz[2] <= v_last + _AXIS_START_TOL * w               # starts at the corner
+                and hz[3] - v_last >= _FRAME_MIN_FRAC * w]
+        if not axes:
+            continue
+        bottom = max(hz[1] for hz in axes)
+        right = max(hz[3] for hz in axes if hz[1] == bottom)
+        top = min([v_top] + [hz[0] for hz in axes])
+        area = (right - v_first) * (bottom - top)
+        if bottom - top >= _FRAME_MIN_FRAC * h and area > best_area:
+            best, best_area = (v_first, top, right, bottom), area
+    return tuple(int(x) for x in best) if best else None
 
 
 def _frame_thickness(ink: np.ndarray, frame, edge: str) -> int:
@@ -121,7 +204,7 @@ def _frame_thickness(ink: np.ndarray, frame, edge: str) -> int:
         "right": lambda n: ink[top:bottom + 1, x1 - n] if x1 - n >= 0 else None,
     }[edge]
     n = 0
-    while (row := line(n)) is not None and row.mean() >= _FRAME_MIN_FRAC:
+    while (row := line(n)) is not None and row.mean() >= _EDGE_FILL_FRAC:
         n += 1
     return max(n, 1)
 
@@ -144,15 +227,24 @@ def _run_centres(hits: np.ndarray, offset: int) -> list[float]:
     return centres
 
 
+def _attached(band: np.ndarray) -> np.ndarray:
+    """Per column of `band` (rows ordered away from the axis line), how many
+    consecutive ink pixels start at the line — a tick's length — allowing one
+    light pixel row between line and tick (antialiasing). Ink that does not
+    touch the axis (gridline dots, markers, labels) counts zero."""
+    run = lambda b: np.cumprod(b, axis=0).sum(axis=0)
+    return np.maximum(run(band), run(band[1:])) if len(band) > 1 else run(band)
+
+
 def tick_pixels(arr: np.ndarray, frame, axis: str) -> list[float]:
     """Best-effort tick-mark centres along the bottom (`axis="x"`) or left
-    (`axis="y"`) frame edge, in pixel coordinates of `arr`: short ink runs
-    perpendicular to the edge, just inside the frame (or, failing that, just
-    outside). Pair them with the tick labels read off the figure and call
-    calibrate.fit_axis. Check the count against the labels — a marker sitting
-    on the axis line can masquerade as a tick, and a figure with unlabelled
-    minor ticks yields more centres than labels."""
-    ink = _ink_mask(arr)
+    (`axis="y"`) frame edge, in pixel coordinates of `arr`: short lines
+    attached to the axis line and perpendicular to it, on whichever side of
+    the line carries them. Pair them with the tick labels read off the
+    figure and call calibrate.fit_axis. Check the count against the labels — a
+    marker sitting on the axis line can masquerade as a tick, and a figure
+    with unlabelled minor ticks yields more centres than labels."""
+    ink = _line_mask(arr)
     x0, top, x1, bottom = frame
     h, w = ink.shape
     # The frame's own lines must not read as ticks: scan only strictly inside them.
@@ -160,18 +252,22 @@ def tick_pixels(arr: np.ndarray, frame, axis: str) -> list[float]:
     inner_x = slice(x0 + t["left"], x1 - t["right"] + 1)
     inner_y = slice(top + t["top"], bottom - t["bottom"] + 1)
 
-    def scan(band: np.ndarray, along_axis: int, offset: int) -> list[float]:
-        return _run_centres(band.sum(axis=along_axis) >= _TICK_MIN_LEN_PX, offset)
+    def centres(band: np.ndarray, offset: int) -> list[float]:
+        return _run_centres(_attached(band) >= _TICK_MIN_LEN_PX, offset)
 
     if axis == "x":
-        inside = ink[max(inner_y.stop - _TICK_BAND_PX, 0):inner_y.stop, inner_x]
-        outside = ink[bottom + 1:min(bottom + 1 + _TICK_BAND_PX, h), inner_x]
-        found = scan(inside, 0, inner_x.start)
-        return found if len(found) >= 2 else scan(outside, 0, inner_x.start)
-    inside = ink[inner_y, inner_x.start:min(inner_x.start + _TICK_BAND_PX, w)]
-    outside = ink[inner_y, max(x0 - _TICK_BAND_PX, 0):x0]
-    found = scan(inside, 1, inner_y.start)
-    return found if len(found) >= 2 else scan(outside, 1, inner_y.start)
+        edge_in, edge_out = bottom - t["bottom"], bottom + 1        # first rows past the line
+        inside = ink[max(edge_in - _TICK_BAND_PX + 1, 0):edge_in + 1, inner_x][::-1]
+        outside = ink[edge_out:edge_out + _TICK_BAND_PX, inner_x]
+        offset = inner_x.start
+    else:
+        edge_in, edge_out = x0 + t["left"], x0 - 1                   # first columns past the line
+        inside = ink[inner_y, edge_in:edge_in + _TICK_BAND_PX].T
+        outside = ink[inner_y, max(edge_out - _TICK_BAND_PX + 1, 0):edge_out + 1].T[::-1]
+        offset = inner_y.start
+    # Ticks sit on one side of the axis; the other side only catches stray ink
+    # touching the line (a marker sitting on it), so the side with more wins.
+    return max(centres(inside, offset), centres(outside, offset), key=len)
 
 
 def detect_blobs(arr: np.ndarray) -> list[dict]:

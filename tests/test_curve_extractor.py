@@ -371,6 +371,52 @@ def test_tick_pixels_falls_back_to_outside_ticks():
     assert raster.tick_pixels(img, frame, "x") == pytest.approx([100.5, 200.5, 300.5])
 
 
+def test_find_frame_reads_jpeg_gray_axis_lines():
+    # Quinn et al. 2015's scanned axis lines are gray (~145), above the marker
+    # ink threshold; the frame used to vanish.
+    img = _figure()
+    img[img == 0] = 145
+    assert raster.find_frame(img) == (40, 20, 380, 260)
+
+
+def test_find_frame_accepts_open_l_shaped_axes():
+    img = np.full((300, 400), 255, dtype=np.uint8)
+    img[20:261, 40:42] = 0                              # left axis only
+    img[259:261, 40:381] = 0                            # bottom axis only
+    assert raster.find_frame(img) == (40, 20, 380, 260)
+
+
+def test_find_frame_ignores_a_neighbouring_panel_caught_in_the_crop():
+    img = np.full((400, 400), 255, dtype=np.uint8)
+    frame = _figure()
+    img[:300] = frame
+    img[330:332, 40:381] = 0                            # next panel's top edge, below the tick labels
+    img[330:400, 40:42] = 0
+    img[330:400, 379:381] = 0
+    assert raster.find_frame(img) == (40, 20, 380, 260)
+
+
+def test_find_frame_bridges_an_axis_corner_blanked_by_hollow_markers():
+    img = _figure()
+    img[255:265, 42:90] = 255                           # white-filled markers over the corner
+    assert raster.find_frame(img) == (40, 20, 380, 260)
+
+
+def test_find_frame_is_not_fooled_by_dotted_gridlines():
+    img = _figure()
+    img[140:142, 42:379:6] = 0                          # dotted horizontal gridline
+    img[140:142, 43:379:6] = 0
+    assert raster.find_frame(img) == (40, 20, 380, 260)
+
+
+def test_tick_pixels_ignores_a_dotted_gridline_lying_along_the_axis():
+    img = _figure(ticks_x=(), ticks_y=())
+    img[255:258, 44:378:6] = 0                          # gridline dots touching the bottom line
+    for tx in (100, 200, 300):
+        img[261:271, tx:tx + 2] = 0                     # the real ticks, outside
+    assert raster.tick_pixels(img, raster.find_frame(img), "x") == pytest.approx([100.5, 200.5, 300.5])
+
+
 def test_detect_markers_in_image_groups_by_shape_family():
     img = _figure()
     for i, cx in enumerate(range(80, 340, 40)):

@@ -75,10 +75,12 @@ For a multi-panel figure, slice `arr` into one array per panel (you know the lay
 the page) and run everything below per panel; pixel coordinates are then relative to that slice.
 
 **Toolkit API** (all on a grayscale array; pixel coordinates of that array):
-- `raster.find_frame(arr) -> (x0, top, x1, bottom) | None` — the plot frame of a single-panel region.
+- `raster.find_frame(arr) -> (x0, top, x1, bottom) | None` — the plot frame of one panel (a closed box
+  or open L-shaped axes); a crop that also catches the edge of a neighbouring panel is fine.
 - `raster.tick_pixels(arr, frame, "x" | "y") -> [px, ...]` — tick-mark centres along the bottom / left
-  frame edge. Pair with the tick labels you read off the figure; check the count matches the labels
-  (drop unlabelled minor ticks or a marker sitting on the axis line).
+  axis, minor ticks included; a tick exactly on the frame corner is not returned (the frame edge is
+  that position). Pair with the tick labels you read off the figure; check the count matches (drop
+  unlabelled minor ticks or a marker sitting on the axis line).
 - `calibrate.fit_axis("x", tick_pixels, tick_values) -> cal` — least-squares pixel→data fit, linear or
   log10 chosen automatically; `cal.pixel_to_data(px)`, `cal.model`, `cal.ok` (residual within 2 % of
   span). Do the same for `"y"`.
