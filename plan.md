@@ -2,7 +2,7 @@
 
 A development plan for a web app that turns rare-earth-element (REE) solvent-extraction papers into a queryable database, computes extraction parameters, and answers questions against the accumulated data.
 
-> **Status:** This document is the original *design plan*. The application has since been built and has moved past the plan in places — most notably the pinned extraction prompt is now **`extraction_v6`** (the plan was written when `extraction_v5.1` was current; the prompt evolved v5.1 → v5.2 → v6, see `prompts/CHANGELOG.md`). Where this plan names `extraction_v5.1` as the *current pinned default*, read `extraction_v6`; the historical discussion of the v5 → v5.1 evolution is kept for design rationale. Section numbers here (`README §6`, etc.) are referenced throughout the code and the [CLAUDE.md](CLAUDE.md) guide. Build order is in [Section 10](#10-milestones--build-order).
+> **Status:** This document is the original *design plan*. The application has since been built and has moved past the plan in places — most notably the pinned extraction prompt is now **`extraction_v12`** (the plan was written when `extraction_v5.1` was current; see `prompts/CHANGELOG.md` for every version since). Where this plan names `extraction_v5.1` as the *current pinned default*, read `extraction_v12`; the historical discussion of the v5 → v5.1 evolution is kept for design rationale. Section numbers here (`README §6`, etc.) are referenced throughout the code and the [CLAUDE.md](CLAUDE.md) guide. Build order is in [Section 10](#10-milestones--build-order).
 
 ---
 
@@ -530,7 +530,8 @@ Every extraction run produces a `QAReport` *before* it reaches the review UI, an
 | Check | What it does | Verdict |
 | --- | --- | --- |
 | **Schema conformance** | All 26 columns present, correct dtypes, units sane | red if columns missing |
-| **Row-count sanity per element** | For each REE series the figure shows, count digitized rows; `< 8` rows for a curve-type figure = flag (calibrated to real extractions of 15–20 points/element) | red (sparse) |
+| **Row-count sanity per element** | For each REE series the figure shows, count digitized rows; `< 8` rows for a curve-type figure = flag (calibrated to real extractions of 15–20 points/element) | red (sparse) — *as built since 2026-09-25: red only at ≤ 2 rows, amber below 8 (see note below)* |
+| **Sampled-from-line** *(added 2026-09-25)* | A series evenly spaced in pH **and** lying on one log D line within 0.01 decades was generated from a fitted line, not digitized | red |
 | **Text-endpoint cross-check** | For each `text_endpoints` row (from `extraction_v5.1`), find the nearest digitized point at that x and compare y; mismatch beyond tolerance (e.g. >10% on %E, >0.3 on pH) = flag | red |
 | **Vocabulary drift** | `Extractant type` / `mixing method` / `Sources` value not in `validation/vocab.py`'s known list → surface as "new value — confirm" | amber (never block) |
 | **Monotonicity** | For *%E vs pH* curves, check the series is broadly monotonic (allowing a plateau); a wildly non-monotonic series suggests misread points or mixed-up series | amber |
@@ -546,6 +547,8 @@ Every extraction run produces a `QAReport` *before* it reaches the review UI, an
 | **Axis calibration drift** | Text-endpoint cross-check + axis-bounds checks: if calibration drifted, digitized values won't match the `text_endpoints` the paper states and will often breach plausible bounds. |
 | **OCR-garbled tables** | Schema-conformance (dtype) check: garbled numerics fail to parse as `REAL` and surface as nulls/red flags rather than silently entering as text. |
 | **Silent under-extraction ("stopped at 2 endpoints")** | The flagship **row-count sanity per element** check — a multi-point figure yielding `< 8` rows (vs. the expected 15–20) is exactly this failure, and it's a *red, merge-gating* flag, not a soft warning. The text-endpoint cross-check is the second net: 2 endpoints that happen to match the prose still get caught because the *curve between them* is missing. This is the single most important QA rule in the system. |
+
+> **Note (2026-09-25).** The `< 8` threshold assumed every curve has 15–20 points. Quinn et al. 2015's series have 5–7 markers, so a *correct* extraction of it failed the gate — and the prompt's matching "10–20 points is the target" pushed the model the other way: an `extraction_v10` run padded every series to 13 points sampled off the fitted lines, and passed QA. The check now stays red only for the failure it was designed for (≤ 2 rows: the text's endpoints and nothing else), is amber below 8, and the new sampled-from-line check covers the opposite failure — invented points. The principle below still holds; it applies in both directions.
 
 The guiding principle: a plausible-looking-but-wrong extraction is worse than an obviously-broken one, so the checks are tuned to catch *silent under-extraction* loudly, even at the cost of occasional false positives the reviewer can override.
 

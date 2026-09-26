@@ -28,13 +28,15 @@ gating, and a strict read/write boundary.
   [extractant]* plot into a fixed 26-column table, one row per data point per
   element
 - 🔎 **Grounds the model against itself** — a deterministic pre-pass counts
-  figure markers straight from the PDF's own vector geometry, calibrates the
-  axes, and hands the model both the counts and the (x, y) coordinates as
-  ground truth, directly attacking silent under-digitization and the cost of
-  the model doing that work itself
+  figure markers straight from the PDF's own vector geometry and hands the
+  model the counts as ground truth, directly attacking silent
+  under-digitization; for scanned figures it points the model at every figure
+  image, and ships the repo's own tested digitizer into the model's sandbox so
+  it doesn't rewrite one
 - ✅ **Auto-QAs every extraction** — row-count sanity, axis-range bounds,
-  monotonicity, duplicates, vocabulary drift, and cross-checks against the
-  paper's own stated numbers; failures **gate the merge**
+  monotonicity, off-curve points, duplicates, vocabulary drift, cross-checks
+  against the paper's own stated numbers, and detection of points *generated*
+  from a fitted line rather than digitized; failures **gate the merge**
 - 👤 **Keeps a human in the loop** — approve / edit / reject each result in an
   editable grid; data enters the database only on approval, via one atomic
   transaction with a full audit log
@@ -129,7 +131,7 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 215 tests, no live model or network required
+python -m pytest        # 284 tests, no live model or network required
 ```
 
 The suite covers unit conversions, the solve-for-the-blank calculator and its
@@ -149,7 +151,9 @@ assistant's tools.
 - [x] Content-hash + DOI de-duplication before extraction
 - [x] Full automatic QA suite with red/amber flags and merge gating
 - [x] Deterministic vector-figure curve pre-pass as a grounding anchor (`extraction_v6`)
-      and as a digitizer handing the model pre-calibrated coordinates (`extraction_v8`)
+- [x] Sandbox toolkit: the repo's raster digitizer (frame, ticks, markers, axis fit) shipped
+      into the model's code-execution sandbox (`extraction_v11`); `extraction_v12` targets each
+      figure's real marker count and QA rejects series sampled off a fitted line
 - [x] Human review / edit / merge with an append-only audit log, plus an on-demand
       "re-extract with QA feedback" middle path
 - [x] Message Batches API path (50% cheaper) with transparent continuation of paused items; raster-figure papers always take it
@@ -160,14 +164,18 @@ assistant's tools.
 
 **Building next**
 
-- [ ] **Live validation** of the 2026-07/08 changes that have only unit tests so far —
+- [ ] **Live validation** of the changes that have only offline tests so far —
       `extraction_v9`'s log-log sweep recovery, the panel-merge gate, QA-feedback
-      re-extraction, and the scikit-image raster path — then tuning the QA
-      tolerances (text-endpoint %E / pH thresholds) on the first dozen papers
+      re-extraction, the sandbox toolkit and `extraction_v12` (first: a batch run on the
+      raster Quinn et al. 2015 paper) — then tuning the QA tolerances on the first dozen papers
+- [ ] **Move figure digitizing out of the model's code loop** — a sibling local-model
+      experiment showed deterministic code (panels, markers, calibration) plus the model only
+      *reading* labels and legends reaches 99.4% recall on the approved Swain & Otu data; the
+      cost of the current loop grows with the square of its length
 - [ ] **Monochrome figures as ground truth** — stroked-glyph markers (×/+/✶) are
       now assembled but need an oracle paper before the pre-pass can vouch for them
-- [ ] **Axis tick-label reading** success rate on real papers — the coordinate
-      hand-off only fires when both axes calibrate
+- [ ] **Axis tick-label reading** — `calibrate.auto_ticks` reads no axis on either
+      validation paper, so the pre-pass's coordinate hand-off (`extraction_v8`) has never fired
 - [ ] **Reliable per-series counts on raster figures** — the vector path is
       ground truth today; the raster CV path is still a lower-confidence estimate
 - [ ] Bulk / selective re-extraction workflow when a new prompt version ships
