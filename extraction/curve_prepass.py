@@ -14,9 +14,10 @@ own marker positions betray a panel merge (`_looks_panel_merged` — a same-colo
 curve repeated across side-by-side panels splits into two balanced x-clusters
 separated by the inter-panel gutter, which count uniformity alone cannot catch
 when every series is inflated by the same factor, as on Swain & Otu Fig. 6);
-every other detected figure page is reported as "verify visually", and raster
-pages are flagged for the model to digitise as usual. This keeps us from ever
-injecting a wrong count as ground truth.
+every other detected figure page is reported as "verify visually", and every
+figure-sized embedded image on a raster page is listed for the model to
+digitise as usual. This keeps us from ever injecting a wrong count as ground
+truth.
 
 Authoritative pages also carry pre-calibrated (x, y) marker coordinates
 (`FigurePage.markers`), since `curve_extractor.extractor._extract_vector`
@@ -63,6 +64,10 @@ _PANEL_GAP_FACTOR = 3.0     # dominant x-gap must exceed this multiple of the me
 _PANEL_BALANCE_FRAC = 0.35  # ...and the smaller side must hold this fraction of markers
 _PANEL_MIN_GROUP = 6        # smaller groups give meaningless split statistics
 _PANEL_MIN_SUSPECTS = 2     # one odd group can be noise; a merge inflates several at once
+# An embedded image smaller than this on either side is a journal logo or
+# badge, not a figure (logos seen: <= 72 pt; the smallest data figure seen,
+# Quinn et al. 2015 Fig. 4, is 172 x 137 pt).
+_MIN_FIGURE_PT = 100.0
 
 
 @dataclass
@@ -76,19 +81,27 @@ class FigurePage:
 
 
 @dataclass
-class RasterPage:
-    """A figure page whose plot is an embedded image: nothing to count, but the
-    image's PDF bounding box lets the model render straight to the figure with
-    the sandbox toolkit instead of hunting for it."""
+class RasterFigure:
+    """One embedded figure image on a raster page: nothing to count, but its PDF
+    bounding box lets the model render straight to the figure with the sandbox
+    toolkit instead of hunting for it. A page can hold several (Quinn et al.
+    2015 prints two figures on each of pages 2 and 4), so there is one of these
+    per image, not per page."""
     page_index: int
-    figure_bbox: tuple[float, float, float, float]   # (x0, top, x1, bottom), PDF points
+    bbox: tuple[float, float, float, float]   # (x0, top, x1, bottom), PDF points
+    pixel_size: tuple[int, int]               # the embedded image's own (width, height) in pixels
+
+    @property
+    def dpi(self) -> float:
+        """The resolution the image is embedded at."""
+        return self.pixel_size[0] / ((self.bbox[2] - self.bbox[0]) / 72.0)
 
 
 @dataclass
 class CurvePrepass:
     confident_pages: list[FigurePage] = field(default_factory=list)
     unverified_pages: list[FigurePage] = field(default_factory=list)
-    raster_pages: list[RasterPage] = field(default_factory=list)
+    raster_figures: list[RasterFigure] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -100,7 +113,7 @@ class CurvePrepass:
         return sorted(out, reverse=True)
 
     def to_prompt_block(self) -> str:
-        if not (self.confident_pages or self.unverified_pages or self.raster_pages):
+        if not (self.confident_pages or self.unverified_pages or self.raster_figures):
             return ""
         lines = ["## DETERMINISTIC CURVE ANALYSIS (computed from the PDF's own vector geometry)"]
         for fp in self.confident_pages:
@@ -134,12 +147,21 @@ class CurvePrepass:
                 f"multi-panel figure the deterministic pass can't cleanly separate. Digitise "
                 f"it fully yourself; treat these counts only as a floor."
             )
-        for rp in self.raster_pages:
-            bbox = ", ".join(f"{v:.1f}" for v in rp.figure_bbox)
+        per_page: dict[int, int] = defaultdict(int)
+        for rf in self.raster_figures:
+            per_page[rf.page_index] += 1
+        seen: dict[int, int] = defaultdict(int)
+        for rf in self.raster_figures:
+            seen[rf.page_index] += 1
+            which = (f", figure image {seen[rf.page_index]} of {per_page[rf.page_index]}"
+                     if per_page[rf.page_index] > 1 else "")
+            bbox = ", ".join(f"{v:.1f}" for v in rf.bbox)
+            w, h = rf.pixel_size
             lines.append(
-                f"- **Page {rp.page_index} (raster image):** figure image at PDF bbox "
-                f"(x0, top, x1, bottom) = ({bbox}) pt — not deterministically counted. "
-                f"Render that region and digitise it with the SANDBOX TOOLKIT."
+                f"- **Page {rf.page_index} (raster image{which}):** PDF bbox "
+                f"(x0, top, x1, bottom) = ({bbox}) pt, embedded at {w}×{h} px "
+                f"(~{rf.dpi:.0f} dpi) — not deterministically counted. Render that region "
+                f"and digitise it with the SANDBOX TOOLKIT."
             )
         return "\n".join(lines)
 
@@ -209,9 +231,17 @@ def _markers_json_block(markers: list[MarkerRecord] | None) -> str:
 def analyze(pdf_bytes: bytes) -> CurvePrepass:
     result = CurvePrepass()
     with pdfplumber.open(_BytesIO(pdf_bytes)) as pdf:
-        n_pages = len(pdf.pages)
+        page_figures = [
+            [
+                RasterFigure(i, (im["x0"], im["top"], im["x1"], im["bottom"]),
+                             tuple(int(v) for v in im["srcsize"]))
+                for im in page.images
+                if im["width"] >= _MIN_FIGURE_PT and im["height"] >= _MIN_FIGURE_PT
+            ]
+            for i, page in enumerate(pdf.pages)
+        ]
 
-    for idx in range(n_pages):
+    for idx in range(len(page_figures)):
         try:
             res = extract_curves(pdf_bytes, idx)
         except Exception as e:
@@ -251,7 +281,7 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
             fp = FigurePage(idx, counts, confident=confident, markers=markers)
             (result.confident_pages if fp.confident else result.unverified_pages).append(fp)
             result.warnings.extend(f"page {idx}: {w}" for w in res.warnings)
-        elif res.source == "raster" and res.figure_bbox is not None:
-            result.raster_pages.append(RasterPage(idx, tuple(res.figure_bbox)))
+        elif res.source == "raster":
+            result.raster_figures.extend(page_figures[idx])
 
     return result

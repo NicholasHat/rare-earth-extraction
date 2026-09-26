@@ -1,6 +1,7 @@
 """Tests for the deterministic curve pre-pass and its pipeline wiring."""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -11,7 +12,7 @@ from extraction.curve_extractor import AxisCalibration, CurveExtractionResult, M
 from extraction.curve_prepass import (
     CurvePrepass,
     FigurePage,
-    RasterPage,
+    RasterFigure,
     _looks_panel_merged,
     analyze,
 )
@@ -41,7 +42,8 @@ def test_prompt_block_marks_authoritative_and_raster():
     p = CurvePrepass(
         confident_pages=[FigurePage(2, [19] * 9, confident=True)],
         unverified_pages=[FigurePage(4, [27, 26, 12], confident=False)],
-        raster_pages=[RasterPage(0, (10.0, 20.5, 300.0, 400.25)), RasterPage(6, (1, 2, 3, 4))],
+        raster_figures=[RasterFigure(0, (10.0, 20.5, 300.0, 400.25), (806, 1056)),
+                        RasterFigure(6, (1, 2, 145, 4), (400, 10))],
     )
     block = p.to_prompt_block()
     assert "Page 2 (authoritative)" in block
@@ -49,7 +51,18 @@ def test_prompt_block_marks_authoritative_and_raster():
     assert "verify visually" in block
     # Raster pages name the figure's bbox so the model renders straight to it.
     assert "Page 0 (raster image)" in block and "(10.0, 20.5, 300.0, 400.2) pt" in block
+    assert "embedded at 806×1056 px (~200 dpi)" in block
     assert "Page 6 (raster image)" in block and "SANDBOX TOOLKIT" in block
+
+
+def test_prompt_block_numbers_several_raster_figures_on_one_page():
+    p = CurvePrepass(raster_figures=[
+        RasterFigure(2, (122.6, 53.2, 464.0, 284.5), (949, 644)),
+        RasterFigure(2, (122.6, 350.5, 464.0, 726.1), (949, 1044)),
+    ])
+    block = p.to_prompt_block()
+    assert "Page 2 (raster image, figure image 1 of 2)" in block and "(122.6, 53.2, 464.0, 284.5)" in block
+    assert "Page 2 (raster image, figure image 2 of 2)" in block and "(122.6, 350.5, 464.0, 726.1)" in block
 
 
 def test_prompt_block_injects_calibrated_coordinates_for_authoritative_page():
@@ -89,6 +102,31 @@ def test_unverified_pages_never_get_coordinates_even_if_present():
     assert "DIGITIZED CURVE DATA" not in p.to_prompt_block()
 
 
+def _image(x0, top, x1, bottom, px):
+    return {"x0": x0, "top": top, "x1": x1, "bottom": bottom,
+            "width": x1 - x0, "height": bottom - top, "srcsize": px}
+
+
+def test_analyze_lists_every_figure_image_on_a_raster_page_and_skips_logos():
+    # Quinn et al. 2015 page 2: two figures, one above the other; the journal
+    # logo on page 0 of the same PDF is ~54 x 72 pt.
+    page = SimpleNamespace(images=[
+        _image(122.6, 53.2, 464.0, 284.5, (949, 644)),
+        _image(122.6, 350.5, 464.0, 726.1, (949, 1044)),
+        _image(499.0, 56.7, 553.0, 128.2, (150, 199)),
+    ])
+    raster = CurveExtractionResult(
+        source="raster", is_vector=False, markers=[], x_calibration=None, y_calibration=None,
+        per_group_counts={}, page_index=0, figure_bbox=(122.6, 350.5, 464.0, 726.1), warnings=[],
+    )
+    with patch("extraction.curve_prepass.extract_curves", return_value=raster):
+        with patch("pdfplumber.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.pages = [page]
+            p = analyze(b"fake pdf bytes")
+    assert [f.bbox[1] for f in p.raster_figures] == [53.2, 350.5]
+    assert p.raster_figures[0].pixel_size == (949, 644) and round(p.raster_figures[0].dpi) == 200
+
+
 def _fake_result(markers, x_cal, y_cal, counts):
     return CurveExtractionResult(
         source="vector", is_vector=True, markers=markers,
@@ -110,7 +148,7 @@ def test_analyze_withholds_coordinates_when_an_axis_calibration_is_untrusted():
     fake = _fake_result(markers, _OK_CAL, _BAD_CAL, counts)
     with patch("extraction.curve_prepass.extract_curves", return_value=fake):
         with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [None]
+            mock_open.return_value.__enter__.return_value.pages = [SimpleNamespace(images=[])]
             p = analyze(b"fake pdf bytes")
     assert len(p.confident_pages) == 1
     assert p.confident_pages[0].markers is None
@@ -127,7 +165,7 @@ def test_analyze_carries_coordinates_when_both_axes_trusted():
     fake = _fake_result(markers, _OK_CAL, _OK_CAL, counts)
     with patch("extraction.curve_prepass.extract_curves", return_value=fake):
         with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [None]
+            mock_open.return_value.__enter__.return_value.pages = [SimpleNamespace(images=[])]
             p = analyze(b"fake pdf bytes")
     assert p.confident_pages[0].markers is not None
     assert "DIGITIZED CURVE DATA" in p.to_prompt_block()
@@ -174,7 +212,7 @@ def test_analyze_downgrades_panel_merged_page():
     fake = _fake_result(markers, _OK_CAL, _OK_CAL, counts)
     with patch("extraction.curve_prepass.extract_curves", return_value=fake):
         with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [None]
+            mock_open.return_value.__enter__.return_value.pages = [SimpleNamespace(images=[])]
             p = analyze(b"fake pdf bytes")
     assert p.confident_pages == []
     assert len(p.unverified_pages) == 1
