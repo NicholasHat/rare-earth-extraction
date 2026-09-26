@@ -342,19 +342,38 @@ def _transcript(user_content, chain: list) -> list[dict]:
     return messages
 
 
+def _container_id(chain: list) -> str | None:
+    """The code-execution container the chain's latest turn ran in, if any."""
+    for message in reversed(chain):
+        container = getattr(message, "container", None)
+        if getattr(container, "id", None):
+            return container.id
+    return None
+
+
 def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list) -> list:
     """Continue a message chain whose last entry is resumable (see _resumable),
     re-sending the transcript so far — the documented continuation pattern for
     the server-side tool loop's iteration cap, plus an error tool_result for a
     misspelled tool call — until a non-resumable stop reason or
     _MAX_CONTINUATIONS is hit. `chain` must be non-empty; if its last message
-    isn't resumable, it's returned unchanged. Appends to and returns `chain`."""
+    isn't resumable, it's returned unchanged. Appends to and returns `chain`.
+
+    Each continuation runs in the same code-execution container as the turn it
+    resumes. A request without `container` gets a fresh, empty sandbox, so the
+    replayed transcript would refer to renders, scripts and the unzipped
+    toolkit that no longer exist. An idle container is checkpointed and stays
+    restorable by id for 30 days, so this also holds for a batch item resumed
+    hours after its batch ended."""
     user_content = kwargs["messages"][0]["content"]
 
     for _ in range(_MAX_CONTINUATIONS):
         if not _resumable(chain[-1]):
             return chain
-        _stream_turn(client, {**kwargs, "messages": _transcript(user_content, chain)}, chain)
+        turn = {**kwargs, "messages": _transcript(user_content, chain)}
+        if container_id := _container_id(chain):
+            turn["container"] = container_id
+        _stream_turn(client, turn, chain)
 
     if chain[-1].stop_reason == "pause_turn":
         raise RuntimeError(

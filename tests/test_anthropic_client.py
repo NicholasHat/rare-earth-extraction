@@ -55,6 +55,20 @@ def test_continue_until_done_continues_until_resolved():
     assert client.beta.messages.stream.call_count == 2
 
 
+def test_continuation_resumes_in_the_container_the_paused_turn_ran_in():
+    paused = _msg("pause_turn")
+    paused.container = SimpleNamespace(id="container_A", expires_at="2026-09-24T22:47:13Z")
+    client = _fake_client([_msg("end_turn", "done")])
+    _continue_until_done(client, _KWARGS, [paused])
+    assert client.beta.messages.stream.call_args.kwargs["container"] == "container_A"
+
+
+def test_continuation_of_a_turn_that_never_ran_code_sends_no_container():
+    client = _fake_client([_msg("end_turn", "done")])
+    _continue_until_done(client, _KWARGS, [_typo_msg()])
+    assert "container" not in client.beta.messages.stream.call_args.kwargs
+
+
 def test_continue_until_done_raises_after_max_continuations():
     always_paused = [_msg("pause_turn") for _ in range(anthropic_client._MAX_CONTINUATIONS + 1)]
     client = _fake_client(always_paused)
@@ -409,3 +423,4 @@ def test_effort_is_sent_only_when_configured():
     with patch.object(anthropic_client.config, "EXTRACTION_EFFORT", "medium"):
         kw = anthropic_client._message_kwargs("p", "file_pdf", model="m", analysis_block=None)
     assert kw["output_config"]["effort"] == "medium" and "task_budget" in kw["output_config"]
+
