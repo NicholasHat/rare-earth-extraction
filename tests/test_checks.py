@@ -32,6 +32,47 @@ def test_sparse_result_is_red():
     assert any(f.check == "row_count_sanity" for f in report.reds)
 
 
+def test_a_few_real_markers_are_a_warning_not_a_gate():
+    # Quinn et al. 2015 series really have 4-7 markers; gating on that would
+    # push a re-extraction to pad them.
+    rows = [{EL: "Tb", "pH": 1.0 + 0.37 * i, "Extract%": 10.0 + 12.0 * i} for i in range(6)]
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert report.passed
+    assert any(f.check == "row_count_sanity" for f in report.ambers)
+
+
+def _line_series(element, n, *, step=0.1, noise=None):
+    """%E points generated from one log D line (slope 3), optionally jittered."""
+    out = []
+    for i in range(n):
+        x = 0.5 + step * i
+        log_d = -2.0 + 3.0 * (x - 0.5) + (noise[i] if noise else 0.0)
+        out.append({EL: element, "pH": round(x, 3), "Extract%": 100.0 / (1.0 + 10 ** -log_d)})
+    return out
+
+
+def test_points_sampled_off_a_fitted_line_are_red():
+    report = checks.run(_df(_line_series("Ce", 13)), [], figure_is_curve=True)
+    flags = [f for f in report.reds if f.check == "sampled_from_line"]
+    assert len(flags) == 1 and len(flags[0].rows) == 13
+
+
+def test_evenly_spaced_real_data_is_not_called_sampled():
+    # Even pH setpoints are a normal design; real readings scatter off the line.
+    jitter = [0.05, -0.07, 0.04, -0.03, 0.08, -0.06, 0.02, -0.05, 0.07, -0.04, 0.03, -0.08, 0.05]
+    report = checks.run(_df(_line_series("Ce", 13, noise=jitter)), [], figure_is_curve=True)
+    assert not any(f.check == "sampled_from_line" for f in report.flags)
+
+
+def test_unevenly_spaced_points_exactly_on_a_line_are_not_called_sampled():
+    rows = _line_series("Ce", 8)
+    for r, x in zip(rows, [0.5, 0.62, 0.81, 0.9, 1.07, 1.2, 1.24, 1.4]):
+        log_d = -2.0 + 3.0 * (x - 0.5)
+        r["pH"], r["Extract%"] = x, 100.0 / (1.0 + 10 ** -log_d)
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert not any(f.check == "sampled_from_line" for f in report.flags)
+
+
 def test_sparse_result_not_flagged_when_not_a_curve():
     rows = [{EL: "Yb", "pH": 1.0, "Extract%": 20.0}, {EL: "Yb", "pH": 5.0, "Extract%": 90.0}]
     report = checks.run(_df(rows), [], figure_is_curve=False)

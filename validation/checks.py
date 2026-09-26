@@ -4,7 +4,8 @@ All checks operate on the coerced 26-column DataFrame plus the captured
 text_endpoints, so they are pure and unit-testable without spending API tokens.
 Each known failure mode maps to a check here:
 
-  - silent under-extraction ("stopped at 2 endpoints")  -> row_count_sanity (RED)
+  - silent under-extraction ("stopped at 2 endpoints")  -> row_count_sanity (RED at <= 2 points, AMBER below 8)
+  - points sampled off a fitted line, not digitised     -> sampled_from_line (RED)
   - axis calibration drift                              -> text_endpoint_cross_check / axis_bounds (RED)
   - OCR-garbled numeric tables                          -> schema_conformance (RED)
   - monochrome series merged/dropped                    -> row_count_sanity + duplicate_rows + monotonicity
@@ -23,7 +24,8 @@ from .report import QAReport, Severity
 from .schema import ELEMENT_COLUMN
 
 # Tuning constants (README §11 item 4 — revisit against the first dozen papers).
-SPARSE_MIN_ROWS = 8          # a curve-type figure should yield >= this many points/element
+SPARSE_MIN_ROWS = 8          # fewer points/element than this on a curve-type figure is worth a look (AMBER) ...
+SPARSE_RED_MAX_ROWS = 2      # ... and this few is the "stopped at the text's endpoints" failure (RED)
 PH_TOL = 0.3                 # text-endpoint x-match tolerance on pH
 PCT_TOL = 10.0               # text-endpoint y-mismatch tolerance on %-type metrics
 CONC_TOL_RATIO = 2.0         # text-endpoint x-match tolerance on concentration (a ratio: sweeps are log-spaced)
@@ -34,6 +36,9 @@ OFF_CURVE_INLIER_LOGD = 0.5      # |log D residual| for a point to count as ON t
 OFF_CURVE_FLAG_LOGD = 0.8        # flag needs BOTH: this far off in log D (factor ~6 in D) ...
 OFF_CURVE_FLAG_PCT = 25.0        # ... and this far off in %E (so a 1 % vs 3 % scatter never trips it)
 OFF_CURVE_MIN_INLIER_FRAC = 0.5  # a line must explain at least this share of the band (and >= 4 points)
+SAMPLED_MIN_POINTS = 6           # sampled_from_line: judged only on curves with this many points in the band
+SAMPLED_MAX_SPACING_CV = 0.03    # pH steps this even (std / mean) ...
+SAMPLED_MAX_RESID_LOGD = 0.01    # ... AND every point this close to one log D line => sampled, not digitised
 
 # Map a text-endpoint y_metric / x_basis to the schema column it lives in.
 _Y_METRIC_TO_COL = {
@@ -80,6 +85,7 @@ def run(
     _axis_bounds(df, report)
     _monotonicity(df, report)
     _off_curve(df, report)
+    _sampled_from_line(df, report)
     _duplicate_rows(df, report)
     _vocabulary(df, report)
     _text_endpoint_cross_check(df, text_endpoints, report)
@@ -152,16 +158,29 @@ def _curve_groups(df: pd.DataFrame):
 def _row_count_sanity(df: pd.DataFrame, figure_is_curve: bool, report: QAReport) -> None:
     if not figure_is_curve:
         return
+    # Per element, pooled across experiments: the curve groups key on the
+    # extractant concentration, so a concentration sweep would split into
+    # one-point "curves" here.
     for label, sub in _element_groups(df):
         n = len(sub)
-        if n < SPARSE_MIN_ROWS:
+        if n <= SPARSE_RED_MAX_ROWS:
             report.add(
                 "row_count_sanity",
                 Severity.RED,
-                f"Element '{label}' has only {n} digitized point(s); a multi-point "
-                f"curve should have >= {SPARSE_MIN_ROWS}. Possible silent "
-                "under-extraction (model stopped early instead of digitizing the "
-                "whole curve).",
+                f"Element '{label}' has only {n} digitized point(s) — the signature of "
+                "stopping at the text's stated endpoints instead of digitizing the "
+                "figure's curve.",
+            )
+        elif n < SPARSE_MIN_ROWS:
+            # Not RED: some figures really have 4-7 markers per series (Quinn et
+            # al. 2015). Gating on it would push a re-extraction to pad series
+            # with invented points — the failure sampled_from_line catches.
+            report.add(
+                "row_count_sanity",
+                Severity.AMBER,
+                f"Element '{label}' has {n} digitized point(s), fewer than a typical "
+                f"curve's {SPARSE_MIN_ROWS}+. Confirm the figure shows only this many "
+                "markers for it.",
             )
 
 
@@ -334,6 +353,44 @@ def _off_curve(df: pd.DataFrame, report: QAReport) -> None:
                 rows=rows,
             )
 
+
+
+def _sampled_from_line(df: pd.DataFrame, report: QAReport) -> None:
+    """Curves whose points were generated rather than digitised: evenly spaced
+    in pH AND lying on one straight log D line more exactly than reading
+    markers off a figure can (a pixel is ~0.01 log D on a typical panel, and
+    real digitised series scatter ~0.07 around their line). Seen live: a
+    Quinn et al. 2015 extraction (extraction_v10) returned 13 points per
+    series at 0.1-pH steps, sampled off the fitted lines, where the figure has
+    5-7 markers — spacing CV 0.005 and max residual 0.0015 log D, against
+    >= 0.4 and ~0.07 for real series. Either condition alone is innocent
+    (experiments are often run at even pH setpoints; a clean series is close
+    to linear); both together are not."""
+    if "pH" not in df.columns or "Extract%" not in df.columns:
+        return
+    lo, hi = OFF_CURVE_FIT_PCT
+    for label, sub in _curve_groups(df):
+        s = _curve_points(df, sub)
+        x, pct = s["pH"].to_numpy(float), s["Extract%"].to_numpy(float)
+        band = (pct >= lo) & (pct <= hi)
+        if band.sum() < SAMPLED_MIN_POINTS:
+            continue
+        steps = np.diff(x)
+        if steps.mean() <= 0 or steps.std() / steps.mean() > SAMPLED_MAX_SPACING_CV:
+            continue
+        xb, yb = x[band], _log_d(pct[band])
+        resid = np.abs(yb - np.polyval(np.polyfit(xb, yb, 1), xb))
+        if resid.max() <= SAMPLED_MAX_RESID_LOGD:
+            rows = s["row"].to_numpy()
+            report.add(
+                "sampled_from_line",
+                Severity.RED,
+                f"{label}: all {len(rows)} points are evenly spaced in pH and sit on one "
+                f"log D line within {resid.max():.4f} decades — generated from a fitted "
+                "line, not digitised from the figure's markers. Check the figure's real "
+                "marker count; delete and re-digitise.",
+                rows=rows,
+            )
 
 def _duplicate_rows(df: pd.DataFrame, report: QAReport) -> None:
     key = [ELEMENT_COLUMN, "pH", "Extract%"]
