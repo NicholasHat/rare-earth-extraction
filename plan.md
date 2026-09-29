@@ -2,7 +2,7 @@
 
 A development plan for a web app that turns rare-earth-element (REE) solvent-extraction papers into a queryable database, computes extraction parameters, and answers questions against the accumulated data.
 
-> **Status:** This document is the original *design plan*. The application has since been built and has moved past the plan in places — most notably the pinned extraction prompt is now **`extraction_v12`** (the plan was written when `extraction_v5.1` was current; see `prompts/CHANGELOG.md` for every version since). Where this plan names `extraction_v5.1` as the *current pinned default*, read `extraction_v12`; the historical discussion of the v5 → v5.1 evolution is kept for design rationale. Section numbers here (`README §6`, etc.) are referenced throughout the code and the [CLAUDE.md](CLAUDE.md) guide. Build order is in [Section 10](#10-milestones--build-order).
+> **Status:** This document is the original *design plan*. The application has since been built and has moved past the plan in places — most notably the pinned extraction prompt is now **`extraction_v13`** (the plan was written when `extraction_v5.1` was current; see `prompts/CHANGELOG.md` for every version since). Where this plan names `extraction_v5.1` as the *current pinned default*, read `extraction_v13`; the historical discussion of the v5 → v5.1 evolution is kept for design rationale. Section numbers here (`README §6`, etc.) are referenced throughout the code and the [CLAUDE.md](CLAUDE.md) guide. Build order is in [Section 10](#10-milestones--build-order).
 
 ---
 

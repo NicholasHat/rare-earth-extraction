@@ -31,7 +31,7 @@ LOCAL_PIPELINE_RUNS_DIR = Path(_local_runs).expanduser() if _local_runs else Non
 # --- Settings (with sensible local-demo defaults) --------------------------
 REQUIRE_PASSWORD = os.getenv("REQUIRE_PASSWORD", "false").strip().lower() == "true"
 WRITE_PASSWORD = os.getenv("WRITE_PASSWORD", "")
-EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v12")
+EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v13")
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-sonnet-5")
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
 

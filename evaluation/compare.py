@@ -26,6 +26,8 @@ import config
 from validation import checks
 from validation.schema import coerce_schema
 
+from extraction import provenance
+
 from . import match, sources
 
 
@@ -93,9 +95,10 @@ def report_md(details: list[dict], summary: pd.DataFrame) -> str:
              f"{len(details)} papers. `a` = this pipeline (Claude), `b` = local pipeline.", "",
              "| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     lines += ["| " + " | ".join(_fmt(r[c]) for c in cols) + " |" for _, r in summary.iterrows()]
-    totals = summary[["claude_cost_usd"]].sum(numeric_only=True)
-    lines += ["", f"Claude cost across papers (estimate): ${totals['claude_cost_usd']:.2f}", "",
-              "## Where they disagree", ""]
+    spent = pd.to_numeric(summary["claude_cost_usd"], errors="coerce")
+    lines += ["", f"Claude cost across papers (estimate): ${spent.sum():.2f}"
+              + (f" ({spent.isna().sum()} paper(s) with no recorded cost)" if spent.isna().any() else ""),
+              "", "## Where they disagree", ""]
     for d in details:
         a = d.get("agreement")
         lines.append(f"### {d['paper']}")
@@ -108,6 +111,7 @@ def report_md(details: list[dict], summary: pd.DataFrame) -> str:
         if a["systems_count_differs"]:
             lines.append("- Row counts differ by 3+ (Claude, local): "
                          + ", ".join(f"{k} {v}" for k, v in a["systems_count_differs"].items()))
+        lines += _figure_table(d)
         low = {k: v for k, v in (a.get("field_agreement") or {}).items() if v is not None and v < 0.9}
         if low:
             lines.append("- Fields that disagree on matched rows: " + ", ".join(f"{k} {v}" for k, v in low.items()))
@@ -116,6 +120,24 @@ def report_md(details: list[dict], summary: pd.DataFrame) -> str:
                 lines.append(f"- {name} QA RED: " + ", ".join(d[name]["qa"]["red_checks"]))
         lines.append("")
     return "\n".join(lines)
+
+
+def _figure_table(d: dict) -> list[str]:
+    """Rows per figure from each pipeline, with the reason a figure gave none —
+    which figures each side used is often the whole story of a disagreement."""
+    sides = {name: {provenance.figure_number(f["figure"]): f for f in d[name].get("figures") or []}
+             for name in ("claude", "local")}
+    keys = sorted(set(sides["claude"]) | set(sides["local"]),
+                  key=lambda k: (not str(k).isdigit(), int(k) if str(k).isdigit() else 0, str(k)))
+    if not keys:
+        return []
+    out = ["", "| Figure | Claude rows | Local rows | Claude: why none | Local: why none |", "|---|---|---|---|---|"]
+    for k in keys:
+        c, l = sides["claude"].get(k), sides["local"].get(k)
+        out.append(f"| {k} | {_fmt(c and c['rows'])} | {_fmt(l and l['rows'])} | "
+                   f"{(c or {}).get('reason', '') if c and not c['rows'] else ''} | "
+                   f"{(l or {}).get('reason', '') if l and not l['rows'] else ''} |")
+    return out + [""]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -6,6 +6,10 @@ The OUTPUT CONTRACT asks for a single JSON object with `rows` and
   - extraction_v7+: a compact positional form — a top-level `columns` list of
     the 26 column names plus `rows` as a list of same-length value arrays —
     to avoid paying output tokens for 26 verbose keys on every single row.
+extraction_v13+ adds two optional keys beside `text_endpoints`: `row_figures`
+(the figure each row was digitised from, in row order) and `figures` (every
+figure, whether it was digitised, and why not). A `row_figures` list that
+doesn't line up with `rows` is dropped rather than trusted.
 This parser is deliberately tolerant: it pulls the JSON out of a ```json
 fenced block when present, else falls back to the outermost {...} span, so a
 stray sentence around the block doesn't break the run.
@@ -14,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -29,6 +33,9 @@ class ParsedExtraction:
     text_endpoints: list[dict]
     coercion_failures: int           # numeric cells that were non-null but unparseable
     raw_text: str
+    row_figures: list[str] = field(default_factory=list)   # extraction_v13+: source figure per row
+    figures: list[dict] = field(default_factory=list)      # extraction_v13+: every figure, used or why not
+    row_figures_misaligned: bool = False                     # present but not one per row -> dropped
 
 
 class ParseError(ValueError):
@@ -118,9 +125,17 @@ def parse(raw_text: str) -> ParsedExtraction:
     raw_df = pd.DataFrame(raw_rows) if raw_rows else pd.DataFrame(columns=schema.COLUMNS)
     df = schema.coerce_schema(raw_df)
 
+    row_figures = obj.get("row_figures")
+    misaligned = row_figures is not None and (
+        not isinstance(row_figures, list) or len(row_figures) != len(raw_rows))
+    figures = obj.get("figures")
+
     return ParsedExtraction(
         df=df,
         text_endpoints=[ep for ep in endpoints if isinstance(ep, dict)],
         coercion_failures=coercion_failures,
         raw_text=raw_text,
+        row_figures=[] if misaligned or row_figures is None else [str(f) for f in row_figures],
+        figures=[f for f in figures if isinstance(f, dict)] if isinstance(figures, list) else [],
+        row_figures_misaligned=misaligned,
     )

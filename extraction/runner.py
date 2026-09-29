@@ -21,7 +21,7 @@ import pandas as pd
 
 import config
 from validation import checks
-from validation.report import QAReport
+from validation.report import QAReport, Severity
 
 from . import anthropic_client, curve_prepass, parse_output, prompt_loader
 
@@ -42,6 +42,8 @@ class ExtractionResult:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0  # high value here confirms the cache breakpoint is working
+    row_figures: list[str] = field(default_factory=list)   # source figure per row, as extracted (v13+)
+    figures: list[dict] = field(default_factory=list)      # every figure: digitised or why not (v13+)
     via_batch: bool = False           # billed at the Batches API's 50% rate (a paused item's synchronous continuation, if any, at full rate)
 
 
@@ -92,6 +94,10 @@ def _postprocess(
         coercion_failures=parsed.coercion_failures,
         deterministic_counts=deterministic_counts,
     )
+    if parsed.row_figures_misaligned:
+        report.add("provenance", Severity.AMBER,
+                   "The model's row_figures list doesn't have one entry per row, so which figure each "
+                   "row came from is unknown for this extraction.")
     return ExtractionResult(
         df=parsed.df,
         text_endpoints=parsed.text_endpoints,
@@ -107,6 +113,8 @@ def _postprocess(
         output_tokens=response.output_tokens,
         cache_creation_input_tokens=response.cache_creation_input_tokens,
         cache_read_input_tokens=response.cache_read_input_tokens,
+        row_figures=parsed.row_figures,
+        figures=parsed.figures,
         via_batch=via_batch,
     )
 

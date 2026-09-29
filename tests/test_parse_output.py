@@ -117,3 +117,41 @@ def test_positional_rows_with_wrong_row_length_raises():
     })
     with pytest.raises(parse_output.ParseError, match="row length"):
         parse_output.parse(raw)
+
+
+def _v13(rows, row_figures, figures):
+    from validation import schema
+    return "```json\n" + json.dumps({"columns": schema.COLUMNS, "rows": rows, "text_endpoints": [],
+                                     "row_figures": row_figures, "figures": figures}) + "\n```"
+
+
+def test_v13_provenance_is_parsed():
+    rows = [_positional_row({"pH": 1.0}), _positional_row({"pH": 2.0})]
+    figures = [{"figure": "Fig. 2", "digitised": True, "reason": ""},
+               {"figure": "Fig. 6", "digitised": False, "reason": "NMR spectrum"}]
+    parsed = parse_output.parse(_v13(rows, ["Fig. 2", "Fig. 2"], figures))
+    assert parsed.row_figures == ["Fig. 2", "Fig. 2"] and parsed.figures == figures
+    assert not parsed.row_figures_misaligned
+
+
+def test_row_figures_that_do_not_line_up_with_rows_are_dropped():
+    rows = [_positional_row({"pH": 1.0}), _positional_row({"pH": 2.0})]
+    parsed = parse_output.parse(_v13(rows, ["Fig. 2"], []))
+    assert parsed.row_figures == [] and parsed.row_figures_misaligned
+
+
+def test_pre_v13_output_has_no_provenance():
+    parsed = parse_output.parse("```json\n" + json.dumps({"rows": [], "text_endpoints": []}) + "\n```")
+    assert parsed.row_figures == [] and parsed.figures == [] and not parsed.row_figures_misaligned
+
+
+def test_provenance_summary_counts_rows_per_figure_and_keeps_skip_reasons():
+    from extraction import provenance
+    figs = provenance.summarise(
+        [{"figure": "Fig. 2", "digitised": True}, {"figure": "Figure 6", "digitised": False, "reason": "NMR"}],
+        ["Fig. 2", "Fig. 2(b)", "Fig. 4"])
+    assert figs == [
+        {"figure": "Fig. 2", "rows": 2, "digitised": True, "reason": ""},
+        {"figure": "Figure 6", "rows": 0, "digitised": False, "reason": "NMR"},
+        {"figure": "Fig. 4", "rows": 1, "digitised": True, "reason": ""},    # cited by rows, not listed
+    ]

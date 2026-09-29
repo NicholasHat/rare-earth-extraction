@@ -162,7 +162,7 @@ tables to score both against ground truth.
 - [x] Full automatic QA suite with red/amber flags and merge gating
 - [x] Deterministic vector-figure curve pre-pass as a grounding anchor (`extraction_v6`)
 - [x] Sandbox toolkit: the repo's raster digitizer (frame, ticks, markers, axis fit) shipped
-      into the model's code-execution sandbox (`extraction_v11`); `extraction_v12` targets each
+      into the model's code-execution sandbox (`extraction_v11`, legend-swatch workflow since `extraction_v13`); `extraction_v12`+ targets each
       figure's real marker count and QA rejects series sampled off a fitted line
 - [x] Human review / edit / merge with an append-only audit log, plus an on-demand
       "re-extract with QA feedback" middle path
@@ -176,7 +176,7 @@ tables to score both against ground truth.
 
 - [ ] **Live validation** of the changes that have only offline tests so far —
       `extraction_v9`'s log-log sweep recovery, the panel-merge gate, QA-feedback
-      re-extraction, the sandbox toolkit and `extraction_v12` (first: a batch run on the
+      re-extraction, the sandbox toolkit and `extraction_v13` (first: a batch run on the
       raster Quinn et al. 2015 paper) — then tuning the QA tolerances on the first dozen papers
 - [ ] **Move figure digitizing out of the model's code loop** — a sibling local-model
       experiment showed deterministic code (panels, markers, calibration) plus the model only

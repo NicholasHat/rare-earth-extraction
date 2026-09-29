@@ -17,7 +17,7 @@ import pandas as pd
 
 import config
 from database import connection
-from extraction import staging
+from extraction import provenance, staging
 from validation.schema import coerce_schema
 
 from . import cost
@@ -87,6 +87,7 @@ def load_claude(sha: str) -> Result:
         return Result("staged", r.df, {
             "prompt_version": r.prompt_version, "model": r.model, "usage": usage, "via_batch": r.via_batch,
             "cost_usd": cost.usd(usage, r.model, via_batch=r.via_batch),
+            "figures": provenance.summarise(r.figures, r.row_figures),   # empty before extraction_v13
         })
     approved = _claude_approved(sha)
     if approved is not None:
@@ -115,4 +116,21 @@ def load_local(stem: str, runs_dir: Path) -> Result:
         panels = json.loads((run / "panels.json").read_text())
         info["panels"] = len(panels)
         info["panels_skipped"] = sum(1 for p in panels if p.get("skipped"))
+        info["figures"] = _local_figures(panels, run / "rows_debug.csv")
     return Result("local", coerce_schema(pd.read_csv(rows)), info)
+
+
+def _local_figures(panels: list[dict], debug_csv: Path) -> list[dict]:
+    """The local run's per-figure record in provenance.summarise's shape:
+    rows per figure from rows_debug.csv, and the skip reasons of its panels."""
+    counts = (pd.read_csv(debug_csv)["_figure"].dropna().astype(int).astype(str).value_counts().to_dict()
+              if debug_csv.exists() and debug_csv.stat().st_size else {})
+    by_figure: dict[str, set[str]] = {}
+    for p in panels:
+        key = str(p.get("figure")) if p.get("figure") is not None else "?"
+        reasons = by_figure.setdefault(key, set())
+        if p.get("skipped"):
+            reasons.add(p["skipped"])
+    return [{"figure": f"Fig. {k}", "rows": int(counts.get(k, 0)), "digitised": counts.get(k, 0) > 0,
+             "reason": "; ".join(sorted(r)) if not counts.get(k) else ""}
+            for k, r in sorted(by_figure.items(), key=lambda kv: (not kv[0].isdigit(), int(kv[0]) if kv[0].isdigit() else 0))]

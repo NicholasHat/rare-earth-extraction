@@ -86,3 +86,22 @@ def test_compare_writes_summary_and_report(tmp_path, monkeypatch):
     assert row["claude_rows"] == 6 and row["local_rows"] == 12 and row["matched"] == 6
     assert row["local_minutes"] == 4.2 and row["claude_cost_usd"] == 1.23
     assert "Only local has: La|cyanex272 (6)" in (out / "report.md").read_text()
+
+
+def test_report_lists_rows_per_figure_and_why_a_figure_gave_none(tmp_path, monkeypatch):
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 x")
+    run = tmp_path / "runs" / "p"
+    run.mkdir(parents=True)
+    rows = _table(_sweep())
+    rows.to_csv(run / "rows.csv", index=False)
+    rows.assign(_figure=2).to_csv(run / "rows_debug.csv", index=False)
+    (run / "panels.json").write_text(json.dumps([
+        {"figure": 2, "skipped": None}, {"figure": 6, "skipped": "model: not an x-y plot of data points"}]))
+    monkeypatch.setattr(sources, "load_claude", lambda sha: sources.Result("staged", _table(_sweep()), {
+        "figures": [{"figure": "Fig. 2", "rows": 6, "digitised": True, "reason": ""},
+                    {"figure": "Fig. 6", "rows": 0, "digitised": False, "reason": "NMR spectrum"}]}))
+    compare.main([str(pdf), "--local-runs", str(tmp_path / "runs"), "--out", str(tmp_path / "out")])
+    report = (tmp_path / "out" / "report.md").read_text()
+    assert "| 2 | 6 | 6 |  |  |" in report
+    assert "| 6 | 0 | 0 | NMR spectrum | model: not an x-y plot of data points |" in report

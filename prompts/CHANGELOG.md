@@ -4,7 +4,26 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v12 — digitise the markers the figure has, no more; state only what is true of the sandbox (current pinned default)
+## extraction_v13 — say where each row came from and why any figure was skipped; raster steps use the toolkit's legend workflow (current pinned default)
+- **Provenance.** The OUTPUT CONTRACT gains two keys beside `text_endpoints`:
+  `row_figures` (the source figure of each row, in row order) and `figures`
+  (every numbered figure, whether it was digitised, and a reason when not).
+  From the sibling ree-extraction-local pipeline, whose per-panel record of
+  what it read and why it skipped a panel made its runs reviewable. The 26
+  columns are unchanged; `extraction/parse_output.py` still accepts v7–v12
+  output (the keys are optional there), drops a `row_figures` that doesn't
+  line up with `rows` (QA notes it), and the review page lists the figures.
+- **Raster steps use the toolkit's legend workflow.** Steps 3–5 point at the
+  SANDBOX TOOLKIT block's `find_panels` → `find_swatches` / `match_markers`
+  → `label_centres` / `fit_ticks` chain (ported from the local pipeline on
+  2026-09-29) instead of the blob detector, which stays as the fallback for a
+  legend without drawn swatches.
+- **Step 2's snippet keeps the document alive.** `fitz.open(path)[i]` orphans
+  the page under the sandbox's PyMuPDF 1.21, so the render failed.
+- Everything else is unchanged from v12.
+- (Not yet validated live — no `prompt_runs` record exists for this version.)
+
+## extraction_v12 — digitise the markers the figure has, no more; state only what is true of the sandbox
 - **No point-count target.** v5–v11 said "~10–20 points per element … that is the
   target" in five places. Quinn et al. 2015's series have 5–7 markers, and the
   extraction_v10 run returned 13 evenly spaced points per series sampled off the

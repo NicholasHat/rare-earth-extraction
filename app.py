@@ -21,7 +21,7 @@ import streamlit as st
 import auth
 import config
 from database import connection, merge, naming, papers_repo
-from extraction import runner, staging
+from extraction import provenance, runner, staging
 from extraction.prompt_loader import PromptNotReadyError
 from extraction.runner import ExtractionResult
 from extraction.staging import BatchJob, PaperRef, StagedPaper
@@ -444,6 +444,11 @@ def render_review_queue() -> None:
     if result.text_endpoints:
         with st.expander(f"Captured text endpoints ({len(result.text_endpoints)})"):
             st.dataframe(pd.DataFrame(result.text_endpoints), width="stretch")
+    if result.figures or result.row_figures:
+        figs = provenance.summarise(result.figures, result.row_figures)
+        skipped = sum(1 for f in figs if not f["digitised"])
+        with st.expander(f"Figures ({len(figs) - skipped} digitised, {skipped} skipped — as extracted)"):
+            st.dataframe(pd.DataFrame(figs), width="stretch", hide_index=True)
 
     tracking = render_tracking_inputs(sha, paper.doi)
     note = st.text_input("Review note (optional)", key=f"note_{sha}")
