@@ -54,44 +54,55 @@ unzip -oq "$INPUT_DIR/{FILENAME}" -d /tmp/toolkit && ls "$INPUT_DIR"/*.pdf
 ```
 ```python
 import sys; sys.path.insert(0, "/tmp/toolkit")
-from curve_extractor import raster, calibrate
+from curve_extractor import raster, legend, calibrate, fits
 ```
 **Environment facts — do not probe or reinstall:** PyMuPDF (`import fitz`), numpy, scipy, PIL,
 scikit-image and OpenCV are installed and work. `pdfplumber` does not import here; do not repair it —
 render with PyMuPDF. There is no internet access, so nothing can be installed.
 **You cannot see images you create here.** A render is pixels for your code only; opening a PNG
 with the file viewer returns base64 text that every later step re-reads. Read legends, marker
-shapes, panel layout and in-plot text from the PDF document in this conversation.
+shapes, panel layout, tick labels and in-plot text from the PDF document in this conversation.
 
-**Render a figure region** (the DETERMINISTIC CURVE ANALYSIS block gives each raster page's figure
-bbox in PDF points, origin top-left, same convention as `fitz.Rect`):
+**Render the whole figure** at 300 dpi — every pixel threshold below assumes that scale (the
+DETERMINISTIC CURVE ANALYSIS block gives each raster figure's bbox in PDF points, origin top-left,
+same convention as `fitz.Rect`):
 ```python
 import fitz, numpy as np
-page = fitz.open(PDF_PATH)[PAGE_INDEX]
+doc = fitz.open(PDF_PATH)          # keep this name: the sandbox's PyMuPDF 1.21 orphans a page
+page = doc[PAGE_INDEX]             # whose document was garbage-collected
 pix = page.get_pixmap(dpi=300, clip=fitz.Rect(x0, top, x1, bottom), colorspace=fitz.csGRAY)
 arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)   # 0 = ink
 ```
-For a multi-panel figure, slice `arr` into one array per panel (you know the layout from looking at
-the page) and run everything below per panel; pixel coordinates are then relative to that slice.
 
-**Toolkit API** (all on a grayscale array; pixel coordinates of that array):
-- `raster.find_frame(arr) -> (x0, top, x1, bottom) | None` — the plot frame of one panel (a closed box
-  or open L-shaped axes); a crop that also catches the edge of a neighbouring panel is fine.
-- `raster.tick_pixels(arr, frame, "x" | "y") -> [px, ...]` — tick-mark centres along the bottom / left
-  axis, minor ticks included; a tick exactly on the frame corner is not returned (the frame edge is
-  that position). Pair with the tick labels you read off the figure; check the count matches (drop
-  unlabelled minor ticks or a marker sitting on the axis line).
-- `calibrate.fit_axis("x", tick_pixels, tick_values) -> cal` — least-squares pixel→data fit, linear or
-  log10 chosen automatically; `cal.pixel_to_data(px)`, `cal.model`, `cal.ok` (residual within 2 % of
-  span). Do the same for `"y"`.
-- `raster.detect_markers_in_image(arr) -> (records, warnings)` — line suppression, blob detection,
-  marker-shape filter, text-row removal, shape classification. Each record has `group_key`
-  (`filled_square` / `filled_circle` / `filled_triangle` / `filled_diamond` / `stroked_glyph` /
-  `ambiguous`), `marker_type`, `pixel_x`, `pixel_y`. **Blank the legend and every in-plot text region
-  first** (`arr[y0:y1, x0:x1] = 255`) — the toolkit does not know where they are; you do, from the
-  PDF document. Map shape family → element from the legend, as always.
+**Digitise a scanned figure** — all on that one array, pixel coordinates of it:
+1. `panels = raster.find_panels(arr)` — every plot panel, `(x0, top, x1, bottom)`, reading order.
+   Handles closed boxes, open L-shaped axes, gray scan lines; no need to slice the figure yourself.
+2. `swatches = legend.find_swatches(arr, panels)` — the legend's marker swatches, reading order,
+   each with `.description` (e.g. `"solid square"`, `"open diamond"`). Map each swatch to its legend
+   label from the PDF document by that description; pass only the labelled ones on.
+3. Per panel: `markers = legend.match_markers(arr, panel, labelled_swatches)` — every marker,
+   already assigned to a swatch (`m.swatch` = index into the list you passed, `m.x`, `m.y`). It
+   erases axis/grid lines and in-plot text itself before matching.
+4. Calibrate each axis from its tick-label positions: read the labels' values off the figure
+   (`calibrate.repair_signs(values)` restores minus signs a scan loses), then
+   `pos = legend.label_centres(arr, panel, "x" | "y")`; if `len(pos) > len(values)`,
+   `pos = legend.even_subset(pos, len(values))`; y positions pair with values bottom-up, i.e.
+   `sorted(pos, reverse=True)`; then `cal = calibrate.fit_ticks(axis, pos, values)` (None = not
+   calibratable; `cal.pixel_to_data(px)`). Fallback when labels can't be located:
+   `calibrate.align_ticks(raster.tick_pixels(arr, panel, axis), values, lo_edge, hi_edge)` gives the
+   pairs for `fit_ticks`.
+5. On a log D vs pH (or log[extractant]) panel, each series is a straight line:
+   `series, moved = fits.reassign(series_xy, fill_by_series)` hands a point to the same-fill series
+   whose line it sits on, and `xy, dropped = fits.drop_off_line(xy)` removes points far off a
+   series' own line (in-plot text, stray matches).
+6. `legend.has_top_scale(arr, panel)` is True for a second x scale printed along the top (a
+   mixture-composition plot) — not representable in the 26-column schema; skip that panel.
 
-**Budget per raster figure: about three code runs** — (1) render the region and print its size and
-frame, (2) blank text regions + detect markers + ticks, (3) calibrate, convert, assign series. Do not re-implement any of the
-above, do not iterate on clustering tolerances, and do not re-render a panel to re-confirm a count.
+A figure whose legend has no drawn swatches: `raster.detect_markers_in_image(panel_crop)` finds blobs
+by shape family instead (blank legend and in-plot text first, `arr[y0:y1, x0:x1] = 255`), with
+`raster.find_frame` / `raster.tick_pixels` / `calibrate.fit_axis` for one-panel crops.
+
+**Budget per raster figure: about three code runs** — (1) render, find panels and swatches, print
+them; (2) match markers and calibrate every panel; (3) clean up, convert, assign series. Do not
+re-implement any of the above, do not iterate on tolerances, and do not re-render to re-confirm.
 """

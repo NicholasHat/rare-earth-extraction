@@ -70,22 +70,26 @@ _TEMPLATE_MATCH_THRESHOLD = 0.6
 # lines and ticks are judged on a lighter threshold than markers: a scanned
 # figure's thin lines are JPEG gray (~145 on Quinn et al. 2015), well above
 # the marker threshold, while its markers stay near black. An axis line is a
-# near-continuous run at least _FRAME_MIN_FRAC of the region long (see
-# find_frame for how they make a frame): a gap of up to _LINE_MAX_GAP px is
-# bridged (JPEG speckle), and each pixel row/column is OR-ed with its
-# neighbour so a 1-px line antialiased across two pixel rows still reads as
-# one. The bottom axis may start up to _AXIS_START_TOL of the region's width
-# right of the left axis: hollow markers drawn over the corner blank that
-# stretch with their white fill (69 px on Quinn et al. 2015 Fig. 2, panel 4).
-# Bridging that inside the line instead would weld tick labels onto the axes.
+# near-continuous run at least _AXIS_MIN_PX long (see find_panels for how two
+# make a panel): a gap of up to _LINE_MAX_GAP px is bridged (JPEG speckle),
+# and each pixel row/column is OR-ed with its neighbour so a 1-px line
+# antialiased across two pixel rows still reads as one. The bottom axis may
+# start up to _AXIS_START_TOL_PX right of the left axis: hollow markers drawn
+# over the corner blank that stretch with their white fill (69 px on Quinn et
+# al. 2015 Fig. 2, panel 4); bridging it inside the line instead would weld
+# tick labels onto the axes. Tolerances are absolute pixels at the toolkit's
+# 300 dpi, not fractions of the image, so one rule serves a single-panel crop
+# and a whole multi-panel figure alike (a 3-row figure's panels are ~26 % of
+# its height).
 # A tick is a line at least _TICK_MIN_LEN_PX long attached to the axis line,
 # at most _TICK_MAX_WIDTH_PX wide (Quinn et al. 2015's run ~10 px; a gridline
 # lying along the axis is 2-3 px thick).
 _LINE_THRESHOLD = 200
 _LINE_MAX_GAP = 2
-_AXIS_START_TOL = 0.15
-_FRAME_MIN_FRAC = 0.3
-_FRAME_END_TOL = 0.03
+_AXIS_MIN_PX = 150           # ≈ 0.5 in: shorter runs are ticks, dashes or text, not axes
+_AXIS_START_TOL_PX = 80
+_CORNER_TOL_PX = 15          # a line "ends at" / "lies within" another within this
+_PANEL_OVERLAP_FRAC = 0.5    # a candidate overlapping a larger kept panel this much is the same panel
 _EDGE_FILL_FRAC = 0.5        # share of a frame edge row/column that is ink while still on the line
 _TICK_BAND_PX = 15
 _TICK_MIN_LEN_PX = 5
@@ -156,40 +160,62 @@ def _merge(segments: list[tuple[int, int, int]], tol: float) -> list[tuple[int, 
     return [tuple(m) for m in merged]
 
 
-def find_frame(arr: np.ndarray) -> tuple[int, int, int, int] | None:
-    """The plot frame of a rendered figure region as pixel (x0, top, x1,
-    bottom), outer edges of the axis lines: a vertical left axis and the lowest
-    horizontal line that starts at it within its extent, i.e. the plot's
-    corner. A closed box and an open L-shaped pair of axes both qualify; the
+def _panel_candidates(arr: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """One candidate plot frame per vertical axis line: the line and the
+    lowest horizontal line that starts at it within its extent (the plot's
+    corner). A closed box and an open L-shaped pair of axes both qualify; the
     right edge is where the bottom axis ends, the top where the left axis
-    starts (or a top line, if higher). The largest such frame wins, so a crop
-    that also catches part of a neighbouring panel still returns this panel's
-    frame. Robust to JPEG-gray lines, to a 1-px line antialiased across two
-    pixel rows, to axis lines overhanging the corner where an outside tick sits
-    on them, and to dotted gridlines, which never form a near-continuous run.
-    None when no such corner exists. For a multi-panel figure, crop to one
-    panel (with its tick labels) first."""
+    starts (or a top line, if higher)."""
     lines = _line_mask(arr)
-    h, w = lines.shape
-    tol = _FRAME_END_TOL * h
-    verticals = _merge(_segments(lines.T, _FRAME_MIN_FRAC * h), tol)
-    horizontals = _merge(_segments(lines, _FRAME_MIN_FRAC * w), _FRAME_END_TOL * w)
-    best, best_area = None, 0
-    for v in verticals:
-        v_first, v_last, v_top, v_bottom = v
+    verticals = _merge(_segments(lines.T, _AXIS_MIN_PX), _CORNER_TOL_PX)
+    horizontals = _merge(_segments(lines, _AXIS_MIN_PX), _CORNER_TOL_PX)
+    out = []
+    for v_first, v_last, v_top, v_bottom in verticals:
         axes = [hz for hz in horizontals
-                if v_top - tol <= hz[0] and hz[1] <= v_bottom + tol    # within the axis' extent
-                and hz[2] <= v_last + _AXIS_START_TOL * w               # starts at the corner
-                and hz[3] - v_last >= _FRAME_MIN_FRAC * w]
+                if v_top - _CORNER_TOL_PX <= hz[0] and hz[1] <= v_bottom + _CORNER_TOL_PX
+                and hz[2] <= v_last + _AXIS_START_TOL_PX    # may overshoot left, not start far right
+                and hz[3] - v_last >= _AXIS_MIN_PX]
         if not axes:
             continue
         bottom = max(hz[1] for hz in axes)
         right = max(hz[3] for hz in axes if hz[1] == bottom)
         top = min([v_top] + [hz[0] for hz in axes])
-        area = (right - v_first) * (bottom - top)
-        if bottom - top >= _FRAME_MIN_FRAC * h and area > best_area:
-            best, best_area = (v_first, top, right, bottom), area
-    return tuple(int(x) for x in best) if best else None
+        if bottom - top >= _AXIS_MIN_PX:
+            out.append((int(v_first), int(top), int(right), int(bottom)))
+    return out
+
+
+def _area(f) -> int:
+    return (f[2] - f[0]) * (f[3] - f[1])
+
+
+def _overlap(a, b) -> int:
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return max(w, 0) * max(h, 0)
+
+
+def find_panels(arr: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Every plot panel in a rendered figure, as pixel (x0, top, x1, bottom),
+    outer edges of the axis lines, in reading order. Works on a whole
+    multi-panel figure — no need to slice it first. Robust to JPEG-gray lines,
+    to a 1-px line antialiased across two pixel rows, to axis lines
+    overhanging the corner where an outside tick sits on them, to hollow
+    markers blanking the corner, and to dotted gridlines, which never form a
+    near-continuous run."""
+    kept: list[tuple[int, int, int, int]] = []
+    for f in sorted(_panel_candidates(arr), key=_area, reverse=True):
+        if all(_overlap(f, k) < _PANEL_OVERLAP_FRAC * _area(f) for k in kept):
+            kept.append(f)
+    return sorted(kept, key=lambda f: (f[1] // 50, f[0]))
+
+
+def find_frame(arr: np.ndarray) -> tuple[int, int, int, int] | None:
+    """The plot frame of a rendered single-panel region (the largest panel
+    find_panels sees), or None. A crop that also catches part of a
+    neighbouring panel still returns this panel's frame."""
+    panels = find_panels(arr)
+    return max(panels, key=_area) if panels else None
 
 
 def _frame_thickness(ink: np.ndarray, frame, edge: str) -> int:

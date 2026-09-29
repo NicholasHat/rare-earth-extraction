@@ -39,7 +39,7 @@ Two validation papers probed with `pdfplumber`, revealing a fork the plan only h
 `raster.py` (raster, scikit-image shape families + template-match recovery, plus image-level
 frame and tick detection for the sandbox toolkit — axis lines on a lighter gray threshold than
 markers, frames found as a corner of two axis lines, ticks as short lines attached to an axis;
-16 of 16 Quinn et al. 2015 panels framed correctly at 300 dpi, up from 1), `extractor.py`
+16 of 16 Quinn et al. 2015 panels framed correctly at 300 dpi, up from 1; `find_panels` also boxes every panel of a whole figure), `legend.py` and `fits.py` (ported from ree-extraction-local: markers by template-matching the legend's own swatches, tick-label positions, and the log D straight-line clean-up — 18 of 22 hand-checked Quinn Fig. 1 Nd markers, no false positives), `extractor.py`
 (auto-routing on `is_vector`), and the `curve_prepass.py` integration (M5).
 
 **Open items:**

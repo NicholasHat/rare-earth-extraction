@@ -58,12 +58,13 @@ def test_bundle_imports_and_digitises_without_pdfplumber_or_scikit_image(sandbox
 
 
 def test_guide_names_only_functions_that_exist():
-    from extraction.curve_extractor import calibrate, raster
+    from extraction.curve_extractor import calibrate, fits, legend, raster
+    modules = {"raster": raster, "calibrate": calibrate, "legend": legend, "fits": fits}
     guide = sandbox_toolkit.guide()
-    named = set(re.findall(r"`(raster|calibrate)\.(\w+)\(", guide))
-    assert named, "guide should document toolkit calls"
+    named = set(re.findall(r"(raster|calibrate|legend|fits)\.(\w+)\(", guide))
+    assert {"find_panels", "find_swatches", "match_markers", "label_centres", "fit_ticks"} <= {f for _, f in named}
     for module, fn in named:
-        assert callable(getattr({"raster": raster, "calibrate": calibrate}[module], fn)), f"{module}.{fn}"
+        assert callable(getattr(modules[module], fn)), f"{module}.{fn}"
     assert sandbox_toolkit.FILENAME in guide
     assert "pdfplumber" in guide and "fitz" in guide     # the environment facts the model used to probe for
 
@@ -74,3 +75,8 @@ def test_guide_never_tells_the_model_to_install_or_view_images():
     assert "no internet" in guide
     assert "cannot see images" in guide        # renders are never shown to the model
     assert "look at it" not in guide
+
+
+def test_guide_keeps_the_document_alive_while_rendering():
+    # PyMuPDF 1.21 (the sandbox's) raises "orphaned object" for fitz.open(path)[i].get_pixmap().
+    assert "fitz.open(PDF_PATH)[" not in sandbox_toolkit.guide()

@@ -129,3 +129,45 @@ def fit_ticks(axis: str, tick_pixels: list[float], tick_values: list[float]) -> 
             return cal
         pairs.remove(max(pairs, key=lambda pv: abs(cal.pixel_to_data(pv[0]) - pv[1])))
     return None
+
+
+# Raster figures: tick-label values read off a scan, paired with tick marks.
+# Ported from ree-extraction-local (local_extract/axes.py).
+
+def repair_signs(labels: list[float]) -> list[float]:
+    """Tick labels read off a scan often lose their minus signs ("-0.8" → 0.8).
+    Labels along an axis increase monotonically, so a run that decreases
+    before the smallest magnitude must be negative."""
+    if len(labels) < 2 or all(b > a for a, b in zip(labels, labels[1:])):
+        return labels
+    k = int(np.argmin(np.abs(labels)))
+    fixed = [-abs(v) for v in labels[:k]] + labels[k:]
+    return fixed if all(b > a for a, b in zip(fixed, fixed[1:])) else labels
+
+
+def align_ticks(tick_px: list[float], labels: list[float], lo_edge: float, hi_edge: float
+                ) -> list[tuple[float, float]] | None:
+    """Pair tick-mark pixel positions with label values (both in increasing
+    order along the axis). Tick detection misses marks that coincide with the
+    frame corners and finds unlabelled minor ticks, so try the found ticks
+    with/without the frame edges added, subsampled every k-th, and keep the
+    candidate with exactly one position per label and the most even spacing."""
+    if len(labels) < 2:
+        return None
+    base = sorted(tick_px)
+    options = []
+    for with_lo in (False, True):
+        for with_hi in (False, True):
+            pos = ([lo_edge] if with_lo else []) + [p for p in base if lo_edge + 3 < p < hi_edge - 3] \
+                  + ([hi_edge] if with_hi else [])
+            for k in range(1, 6):
+                for offset in range(k):
+                    sub = pos[offset::k]
+                    if len(sub) == len(labels):
+                        gaps = np.diff(sub)
+                        if len(gaps) and gaps.min() > 0:
+                            options.append((float(gaps.std() / gaps.mean()), sub))
+    if not options:
+        return None
+    spread, best = min(options, key=lambda o: o[0])
+    return list(zip(best, labels)) if spread < 0.08 else None
