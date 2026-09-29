@@ -6,6 +6,8 @@ Each known failure mode maps to a check here:
 
   - silent under-extraction ("stopped at 2 endpoints")  -> row_count_sanity (RED at <= 2 points, AMBER below 8)
   - points sampled off a fitted line, not digitised     -> sampled_from_line (RED)
+  - derived columns that contradict each other          -> arithmetic (RED)
+  - a feed stated as a total recorded per element       -> feed_total (AMBER)
   - axis calibration drift                              -> text_endpoint_cross_check / axis_bounds (RED)
   - OCR-garbled numeric tables                          -> schema_conformance (RED)
   - monochrome series merged/dropped                    -> row_count_sanity + duplicate_rows + monotonicity
@@ -18,6 +20,8 @@ import math
 
 import numpy as np
 import pandas as pd
+
+from calculator.atomic_mass import ATOMIC_MASS_G_PER_MOL
 
 from . import vocab
 from .report import QAReport, Severity
@@ -39,6 +43,8 @@ OFF_CURVE_MIN_INLIER_FRAC = 0.5  # a line must explain at least this share of th
 SAMPLED_MIN_POINTS = 6           # sampled_from_line: judged only on curves with this many points in the band
 SAMPLED_MAX_SPACING_CV = 0.03    # pH steps this even (std / mean) ...
 SAMPLED_MAX_RESID_LOGD = 0.01    # ... AND every point this close to one log D line => sampled, not digitised
+ARITH_REL_TOL = 0.02             # derived columns must agree with the columns they derive from within this
+FEED_TOTAL_MIN_ELEMENTS = 3      # this many elements sharing one feed mM, with no ppm, is ambiguous
 
 # Map a text-endpoint y_metric / x_basis to the schema column it lives in.
 _Y_METRIC_TO_COL = {
@@ -86,6 +92,8 @@ def run(
     _monotonicity(df, report)
     _off_curve(df, report)
     _sampled_from_line(df, report)
+    _arithmetic(df, report)
+    _feed_total(df, report)
     _duplicate_rows(df, report)
     _vocabulary(df, report)
     _text_endpoint_cross_check(df, text_endpoints, report)
@@ -389,6 +397,62 @@ def _sampled_from_line(df: pd.DataFrame, report: QAReport) -> None:
                 f"log D line within {resid.max():.4f} decades — generated from a fitted "
                 "line, not digitised from the figure's markers. Check the figure's real "
                 "marker count; delete and re-digitise.",
+                rows=rows,
+            )
+
+
+def _num(df: pd.DataFrame, col: str) -> pd.Series:
+    return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(np.nan, index=df.index)
+
+
+def _arithmetic(df: pd.DataFrame, report: QAReport) -> None:
+    """Derived columns must agree with what they derive from, row by row:
+    RRE mM = ppm / the element's atomic mass, and molar ratio = extractant
+    mM / RRE mM (per element — the prompt's Step 8). The model computes both;
+    a row where they disagree has at least one wrong number."""
+    mass = df[ELEMENT_COLUMN].map(ATOMIC_MASS_G_PER_MOL) if ELEMENT_COLUMN in df.columns else None
+    if mass is None:
+        return
+    ppm, mm = _num(df, "RRE composition (ppm)"), _num(df, "RRE composition (mM)")
+    conc, ratio = _num(df, "Extractant Conc. (mM)"), _num(df, "Molar ratio of EX/REE")
+    for check, got, expected, what in (
+        ("mM", mm, ppm / mass, "RRE composition (mM) ≠ ppm ÷ atomic mass"),
+        ("ratio", ratio, conc / mm, "Molar ratio of EX/REE ≠ Extractant Conc. (mM) ÷ RRE composition (mM)"),
+    ):
+        bad = ((got - expected).abs() > ARITH_REL_TOL * expected.abs()) & got.notna() & expected.notna()
+        if bad.any():
+            rows = df.index.get_indexer(df.index[bad]) + 1
+            report.add(
+                "arithmetic",
+                Severity.RED,
+                f"{what} on {len(rows)} row(s): {_rows(rows)} — one of those numbers is wrong.",
+                rows=rows,
+            )
+
+
+def _feed_total(df: pd.DataFrame, report: QAReport) -> None:
+    """The same RRE mM on several elements with no ppm: either the paper gave
+    "x mM each", or a *total* ("1.9 mM total RE") was copied onto every
+    element instead of divided among them. Seen live: extraction_v10 on Quinn
+    et al. 2015 put the 1.9 mM total on each of Ce/Pr/Nd/Sm (0.475 mM each).
+    Per element in ppm (a common "0.1 g/L each") gives each element a
+    different mM, so it never trips this."""
+    if ELEMENT_COLUMN not in df.columns:
+        return
+    mm, ppm = _num(df, "RRE composition (mM)"), _num(df, "RRE composition (ppm)")
+    sub = df[mm.notna() & ppm.isna()]
+    if sub.empty:
+        return
+    by_value = sub.groupby(mm[sub.index].round(4))[ELEMENT_COLUMN].agg(lambda e: sorted(set(e)))
+    for value, elements in by_value.items():
+        if len(elements) >= FEED_TOTAL_MIN_ELEMENTS:
+            rows = df.index.get_indexer(sub.index[mm[sub.index].round(4) == value]) + 1
+            report.add(
+                "feed_total",
+                Severity.AMBER,
+                f"RRE composition (mM) = {value:g} on {len(elements)} elements ({', '.join(elements)}) "
+                "with no ppm — check the paper states it per element; a total "
+                f"feed would be {value / len(elements):.4g} mM each.",
                 rows=rows,
             )
 

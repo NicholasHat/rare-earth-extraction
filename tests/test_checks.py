@@ -340,3 +340,34 @@ def test_duplicate_rows_names_same_curve_repeats_but_not_cross_series_copies():
     (flag,) = [f for f in report.flags if f.check == "duplicate_rows"]
     assert flag.rows == (13,)          # only the same-curve repeat is droppable
     assert "4 row(s)" in flag.message  # both pairs are still reported
+
+
+def _feed_rows(element, ppm, mm, conc=500.0, ratio=None, n=8):
+    return [{EL: element, "pH": 1.0 + 0.37 * i, "Extract%": 10.0 + 10.0 * i,
+             "RRE composition (ppm)": ppm, "RRE composition (mM)": mm,
+             "Extractant Conc. (mM)": conc, "Molar ratio of EX/REE": ratio if ratio is not None else conc / mm}
+            for i in range(n)]
+
+
+def test_consistent_derived_columns_pass():
+    rows = _feed_rows("La", 100.0, 100.0 / 138.91) + _feed_rows("Lu", 100.0, 100.0 / 174.97)
+    report = checks.run(_df(rows), [], figure_is_curve=True)
+    assert not any(f.check in ("arithmetic", "feed_total") for f in report.flags)
+
+
+def test_a_molar_ratio_divided_by_the_feed_total_is_red():
+    rows = _feed_rows("La", 100.0, 100.0 / 138.91, ratio=500.0 / 7.0)   # ÷ total, not this element's mM
+    flags = [f for f in checks.run(_df(rows), [], figure_is_curve=True).reds if f.check == "arithmetic"]
+    assert len(flags) == 1 and len(flags[0].rows) == 8 and "Molar ratio" in flags[0].message
+
+
+def test_mm_that_does_not_follow_from_ppm_is_red():
+    rows = _feed_rows("La", 100.0, 1.0)                                   # 100 ppm La is 0.72 mM
+    assert any(f.check == "arithmetic" and "ppm" in f.message
+               for f in checks.run(_df(rows), [], figure_is_curve=True).reds)
+
+
+def test_a_total_feed_copied_onto_each_element_is_flagged():
+    rows = [r for el in ("Ce", "Pr", "Nd", "Sm") for r in _feed_rows(el, None, 1.9, conc=1000.0)]
+    flags = [f for f in checks.run(_df(rows), [], figure_is_curve=True).ambers if f.check == "feed_total"]
+    assert len(flags) == 1 and "0.475" in flags[0].message
