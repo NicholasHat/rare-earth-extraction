@@ -23,6 +23,11 @@ DB_PATH = DATA_DIR / "master.db"       # the SQLite master database
 
 PROMPTS_DIR = ROOT / "prompts"
 
+# The sibling ree-extraction-local project's run directory (data/runs), read by
+# `python -m evaluation.compare`. Optional; unset means "not compared".
+_local_runs = os.getenv("LOCAL_PIPELINE_RUNS_DIR", "")
+LOCAL_PIPELINE_RUNS_DIR = Path(_local_runs).expanduser() if _local_runs else None
+
 # --- Settings (with sensible local-demo defaults) --------------------------
 REQUIRE_PASSWORD = os.getenv("REQUIRE_PASSWORD", "false").strip().lower() == "true"
 WRITE_PASSWORD = os.getenv("WRITE_PASSWORD", "")

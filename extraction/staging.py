@@ -153,10 +153,14 @@ def _failed_runs_path():
     return config.STAGING_DIR / "_failed_runs.jsonl"
 
 
-def record_failed_run(paper: PaperRef, error: Exception) -> None:
+def record_failed_run(paper: PaperRef, error: Exception, *, batch_id: str | None = None) -> None:
     """Append one failed extraction to the failed-runs log. Money was spent and
     nothing was staged, so this is the attempt's only record: what failed and,
-    for an anthropic_client.ExtractionFailed, the tokens billed before it did."""
+    for an anthropic_client.ExtractionFailed, the tokens billed before it did.
+
+    `batch_id` names the Batches API job for a batch item. Retrying a failed
+    collection re-reports that batch turn's usage, so entries sharing a
+    batch_id are one run, not several (evaluation.sources counts it once)."""
     config.ensure_dirs()
     entry = {
         "at": _now_iso(),
@@ -165,6 +169,7 @@ def record_failed_run(paper: PaperRef, error: Exception) -> None:
         "error": str(error),
         "usage": getattr(error, "usage", None),
         "turns_completed": getattr(error, "turns_completed", None),
+        "batch_id": batch_id,
     }
     with _failed_runs_path().open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")

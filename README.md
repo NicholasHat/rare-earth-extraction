@@ -131,15 +131,25 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 284 tests, no live model or network required
+python -m pytest        # 297 tests, no live model or network required
 ```
 
 The suite covers unit conversions, the solve-for-the-blank calculator and its
 Extract% prediction, the QA checks, dedup, the atomic merge transaction and
 version supersession, the read-only SQL guard, the deterministic curve
 extractor and pre-pass, the extraction client's continuation and batch
-handling, the review-queue persistence, the tracking sheet, and the
-assistant's tools.
+handling, the review-queue persistence, the tracking sheet, the evaluation
+tools, and the assistant's tools.
+
+### Comparing against the local pipeline
+
+`python -m evaluation.compare papers/ --local-runs ../ree-extraction-local/data/runs`
+matches this pipeline's result for each PDF (staged, approved, or the cost of a
+failed run) row by row against the sibling local-model pipeline's, runs both
+through the same QA checks, and writes a per-paper summary, the systems
+(element + extractant) only one side found, and each side's cost and runtime to
+`data/comparisons/<date>/`. Add `--ref-dir` with hand-checked `<paper>.csv`
+tables to score both against ground truth.
 
 ## Roadmap
 

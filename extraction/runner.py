@@ -42,6 +42,7 @@ class ExtractionResult:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0  # high value here confirms the cache breakpoint is working
+    via_batch: bool = False           # billed at the Batches API's 50% rate (a paused item's synchronous continuation, if any, at full rate)
 
 
 def _prepass(pdf_bytes: bytes) -> tuple[str, list[int]]:
@@ -80,6 +81,7 @@ def _postprocess(
     prompt_version: str,
     prompt_sha256: str,
     model: str,
+    via_batch: bool = False,
 ) -> ExtractionResult:
     """Parse a model response and run QA — shared by the sync and batch paths."""
     parsed = parse_output.parse(response.text)
@@ -105,6 +107,7 @@ def _postprocess(
         output_tokens=response.output_tokens,
         cache_creation_input_tokens=response.cache_creation_input_tokens,
         cache_read_input_tokens=response.cache_read_input_tokens,
+        via_batch=via_batch,
     )
 
 
@@ -298,6 +301,7 @@ def collect_batch(
                 prompt_version=item.prompt_version,
                 prompt_sha256=item.prompt_sha256,
                 model=item.model,
+                via_batch=True,
             )
         except Exception as e:
             # Broad for the same reason as collect_batch_results: _postprocess

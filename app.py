@@ -196,7 +196,7 @@ def _collect_batch_job(job: BatchJob) -> None:
     errors: dict[str, str] = {}
     for sha, result in results.items():
         if isinstance(result, Exception):
-            staging.record_failed_run(job.papers[sha], result)
+            staging.record_failed_run(job.papers[sha], result, batch_id=job.batch_id)
             errors[sha] = str(result)
             continue
         staging.stage(job.papers[sha], job.items[sha].figure_is_curve, result)
