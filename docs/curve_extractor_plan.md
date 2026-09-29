@@ -48,10 +48,12 @@ markers, frames found as a corner of two axis lines, ticks as short lines attach
   (7 of ~19 Nd points) and there is no oracle-paper count for it, so `curve_prepass.analyze`
   filters to `marker_type == "filled"` before the uniformity / panel-merge / authoritative
   logic. Admitting stroked series needs the §5.2 second-paper fixture first.
-- **Tick-label reading (`calibrate.auto_ticks`).** The v8 coordinate hand-off only fires when
-  both axes calibrate `ok`; on pages where tick labels can't be read the pre-pass degrades to
-  counts only. Measured 2026-09-25: it reads no axis on any page of Swain & Otu or Quinn, so the
-  `DIGITIZED CURVE DATA` block has never fired on a real paper.
+- **Tick-label reading (`calibrate.auto_ticks` / `fit_ticks`).** Fixed 2026-09-29: the frame
+  was the figure's filled background rather than the stroked plot border, and labels stored one
+  character per text run read as separate numbers. Now 9 of 10 Swain & Otu axes calibrate (the
+  miss is a multi-panel figure whose shared x labels sit under another panel), and the
+  `DIGITIZED CURVE DATA` block carries Fig. 2's 171 points, median error 0.01 %E against the
+  approved extraction. Unmeasured on other vector papers.
 - **Panel-merge detection** (`curve_prepass._looks_panel_merged`) catches side-by-side panels
   via a balanced x-split; stacked panels with identical x ranges still rely on the
   count-uniformity gate alone.

@@ -174,8 +174,9 @@ assistant's tools.
       cost of the current loop grows with the square of its length
 - [ ] **Monochrome figures as ground truth** — stroked-glyph markers (×/+/✶) are
       now assembled but need an oracle paper before the pre-pass can vouch for them
-- [ ] **Axis tick-label reading** — `calibrate.auto_ticks` reads no axis on either
-      validation paper, so the pre-pass's coordinate hand-off (`extraction_v8`) has never fired
+- [x] **Axis tick-label reading on vector figures** — 9 of 10 Swain & Otu axes calibrate
+      (was 0); the pre-pass now hands the model 171 pre-digitised Fig. 2 points (`extraction_v8`
+      hand-off, first live on a real paper), median error 0.01 %E against the approved data
 - [ ] **Reliable per-series counts on raster figures** — the vector path is
       ground truth today; the raster CV path is still a lower-confidence estimate
 - [ ] Bulk / selective re-extraction workflow when a new prompt version ships

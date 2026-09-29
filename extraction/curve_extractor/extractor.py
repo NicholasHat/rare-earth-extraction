@@ -29,13 +29,14 @@ def _calibrate(page, frame):
         if ticks is None:
             warns.append(f"{axis}-axis: could not auto-read ticks; supply tick values to calibrate.")
             continue
-        cal = calibrate.fit_axis(axis, ticks[0], ticks[1])
+        cal = calibrate.fit_ticks(axis, ticks[0], ticks[1])
+        if cal is None:
+            warns.append(f"{axis}-axis: tick labels don't fit a linear or log axis; supply tick values.")
+            continue
         if axis == "x":
             x_cal = cal
         else:
             y_cal = cal
-        if not cal.ok:
-            warns.append(f"{axis}-axis: calibration residual high ({cal.residual_rms:.3g}); review.")
     return x_cal, y_cal, warns
 
 

@@ -31,9 +31,16 @@ def page_is_vector(page) -> bool:
 
 
 def find_plot_frame(page) -> tuple[float, float, float, float] | None:
-    """Largest rectangle on the page (the plot border). Falls back to the
-    bounding box of all filled markers if no clear frame rect exists."""
+    """The plot border: the largest stroked, unfilled rectangle on the page —
+    a filled rectangle is a figure's white background, which spans the legend
+    and caption too (Swain & Otu Fig. 2: background 302-553 pt wide, plot
+    frame 346-503). Falls back to the largest rectangle of any kind, then to
+    the bounding box of all filled markers."""
     rects = [r for r in page.rects if r["width"] > 50 and r["height"] > 50]
+    frames = [r for r in rects if r.get("stroke") and not r.get("fill")]
+    if frames:
+        big = max(frames, key=lambda r: r["width"] * r["height"])
+        return (big["x0"], big["top"], big["x1"], big["bottom"])
     if rects:
         big = max(rects, key=lambda r: r["width"] * r["height"])
         return (big["x0"], big["top"], big["x1"], big["bottom"])

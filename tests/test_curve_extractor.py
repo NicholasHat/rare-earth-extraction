@@ -12,7 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from extraction.curve_extractor import calibrate, markers, raster
+from extraction.curve_extractor import calibrate, detect, markers, raster
 from extraction.curve_extractor.types import AxisCalibration
 
 
@@ -41,6 +41,57 @@ def test_fit_axis_flags_bad_residual():
     values = [0, 1, 2, 9, 4]  # one wild outlier -> high residual
     cal = calibrate.fit_axis("x", pixels, values)
     assert not cal.ok
+
+
+def _char(text, x0, top, w=4.0, h=7.0):
+    return {"text": text, "x0": x0, "x1": x0 + w, "top": top, "bottom": top + h}
+
+
+def _label(text, x0, top):
+    """A label stored one character per text run, as Swain & Otu's PDF does."""
+    return [_char(ch, x0 + 4.0 * i, top) for i, ch in enumerate(text)]
+
+
+def test_auto_ticks_joins_a_label_split_into_single_characters():
+    from types import SimpleNamespace
+    frame = (100.0, 50.0, 300.0, 250.0)
+    chars = []
+    for i, text in enumerate(["0", "10", "20", "30", "40"]):
+        chars += _label(text, 100.0 + 50.0 * i, 253.0)          # under the frame
+    pixels, values = calibrate.auto_ticks(SimpleNamespace(chars=chars), frame, "x")
+    assert values == [0.0, 10.0, 20.0, 30.0, 40.0]
+
+
+def test_auto_ticks_reads_y_labels_right_of_the_frame_when_the_left_has_none():
+    from types import SimpleNamespace
+    frame = (100.0, 50.0, 300.0, 250.0)
+    chars = []
+    for i, text in enumerate(["3", "2", "1", "0"]):
+        chars += _label(text, 305.0, 50.0 + 60.0 * i)
+    _, values = calibrate.auto_ticks(SimpleNamespace(chars=chars), frame, "y")
+    assert values == [3.0, 2.0, 1.0, 0.0]
+
+
+def test_fit_ticks_drops_a_stray_number_that_is_not_a_tick():
+    # "... M at pH 1.75" in an axis title lands among the tick labels.
+    pixels = [100, 150, 200, 250, 300, 180]
+    values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.75]
+    cal = calibrate.fit_ticks("x", pixels, values)
+    assert cal is not None and cal.ok and 1.75 not in cal.tick_values
+
+
+def test_fit_ticks_gives_up_rather_than_fitting_nonsense():
+    assert calibrate.fit_ticks("x", [100, 150, 200], [5.0, 0.1, 9.0]) is None
+
+
+def test_plot_frame_is_the_stroked_border_not_a_filled_background():
+    from types import SimpleNamespace
+    background = {"x0": 302, "top": 68, "x1": 553, "bottom": 304, "width": 251, "height": 236,
+                  "fill": True, "stroke": False}
+    border = {"x0": 346, "top": 68, "x1": 503, "bottom": 243, "width": 157, "height": 175,
+              "fill": False, "stroke": True}
+    page = SimpleNamespace(rects=[background, border], curves=[])
+    assert detect.find_plot_frame(page) == (346, 68, 503, 243)
 
 
 def test_fit_axis_needs_two_ticks():

@@ -5,9 +5,12 @@ Shared by both paths. Each path detects tick **pixel positions** and their
 linear and a log10 model and keeps whichever has the lower residual, so a log
 axis (e.g. the 0.05→1.0 concentration sweep) is detected automatically.
 
-Tick *values* are the one genuinely-OCR part (plan §4.4): `auto_ticks` makes a
-best-effort read from pdfplumber chars, and the caller falls back to
-LLM-supplied tick values when it returns too few.
+Tick *values* are the one genuinely-OCR part (plan §4.4): `auto_ticks` reads
+them from the PDF's own characters beside the frame, and `fit_ticks` fits them,
+dropping a stray number that isn't a tick label. When too few labels are
+found, the caller falls back to LLM-supplied tick values. Both follow the
+sibling ree-extraction-local project, which calibrates every Swain & Otu
+vector panel this way.
 """
 from __future__ import annotations
 
@@ -18,7 +21,16 @@ import numpy as np
 from .types import AxisCalibration
 
 _RESIDUAL_FRAC_THRESHOLD = 0.02
-_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+_NUM_RE = re.compile(r"^-?\d*\.?\d+$")
+# Characters join into one label when on the same line and this close: a PDF
+# may store "30" as "3" + "0" as separate text runs, and word extraction then
+# reads two labels, "3" and "0" (why Swain & Otu's axes never calibrated).
+_JOIN_GAP_PT = 1.2
+_SAME_LINE_PT = 1.5
+# Where tick labels sit relative to the frame, in PDF points.
+_X_LABEL_BAND_PT = 14
+_Y_LABEL_BAND_PT = 30
+_MIN_LABELS = 3
 
 
 def _fit_linear(pixels: np.ndarray, values: np.ndarray):
@@ -57,24 +69,63 @@ def fit_axis(axis: str, tick_pixels: list[float], tick_values: list[float]) -> A
     )
 
 
+def _numeric_labels(chars: list[dict]) -> list[tuple[float, float, float]]:
+    """Join characters into numbers: (x centre, y centre, value)."""
+    chars = sorted(chars, key=lambda c: (round(c["top"]), c["x0"]))
+    runs: list[list[dict]] = []
+    for c in chars:
+        if runs and abs(c["top"] - runs[-1][-1]["top"]) < _SAME_LINE_PT \
+                and c["x0"] - runs[-1][-1]["x1"] < _JOIN_GAP_PT:
+            runs[-1].append(c)
+        else:
+            runs.append([c])
+    out = []
+    for run in runs:
+        text = "".join(c["text"] for c in run).strip().replace("\u2212", "-").replace("\u2013", "-")
+        if _NUM_RE.match(text):
+            out.append(((run[0]["x0"] + run[-1]["x1"]) / 2,
+                        (min(c["top"] for c in run) + max(c["bottom"] for c in run)) / 2,
+                        float(text)))
+    return out
+
+
 def auto_ticks(page, frame, axis: str) -> tuple[list[float], list[float]] | None:
-    """Best-effort read of (tick_pixels, tick_values) from numeric chars just
-    outside the plot frame. Returns None if fewer than 3 monotone numeric labels
-    are found (caller then uses an LLM-supplied mapping)."""
+    """Best-effort read of (tick_pixels, tick_values) from the numeric labels
+    printed just outside the plot frame: under it for x, left of it (or, when
+    the left has too few, right of it) for y. Positions are the labels' own
+    centres. Returns None if fewer than 3 are found (caller then uses an
+    LLM-supplied mapping)."""
     x0, top, x1, bottom = frame
-    found: list[tuple[float, float]] = []
-    for w in page.extract_words():
-        if not _NUM_RE.match(w["text"]):
-            continue
-        cx, cy = (w["x0"] + w["x1"]) / 2, (w["top"] + w["bottom"]) / 2
-        if axis == "x" and bottom - 2 < cy < bottom + 28 and x0 - 25 < cx < x1 + 25:
-            found.append((cx, float(w["text"])))
-        elif axis == "y" and x0 - 50 < cx < x0 + 4 and top - 12 < cy < bottom + 12:
-            found.append((cy, float(w["text"])))
-    # dedupe by pixel, require monotone value sequence
-    found = sorted(set(found))
-    if len(found) < 3:
+    if axis == "x":
+        chars = [c for c in page.chars
+                 if bottom < c["top"] < bottom + _X_LABEL_BAND_PT
+                 and x0 - 10 < (c["x0"] + c["x1"]) / 2 < x1 + 10]
+        found = sorted({(x, v) for x, _, v in _numeric_labels(chars)})
+    else:
+        found = []
+        for side in ("left", "right"):
+            if side == "left":
+                chars = [c for c in page.chars if x0 - _Y_LABEL_BAND_PT < c["x0"] and c["x1"] < x0 - 0.5
+                         and top - 6 < (c["top"] + c["bottom"]) / 2 < bottom + 6]
+            else:
+                chars = [c for c in page.chars if x1 + 0.5 < c["x0"] < x1 + _Y_LABEL_BAND_PT
+                         and top - 6 < (c["top"] + c["bottom"]) / 2 < bottom + 6]
+            found = sorted({(y, v) for _, y, v in _numeric_labels(chars)})
+            if len(found) >= _MIN_LABELS:
+                break
+    if len(found) < _MIN_LABELS:
         return None
-    pixels = [p for p, _ in found]
-    values = [v for _, v in found]
-    return pixels, values
+    return [p for p, _ in found], [v for _, v in found]
+
+
+def fit_ticks(axis: str, tick_pixels: list[float], tick_values: list[float]) -> AxisCalibration | None:
+    """fit_axis, dropping the worst-fitting label while the fit is poor — a
+    stray number in the label band (a condition in an axis title, "at pH
+    1.75") is not a tick. None when fewer than 3 labels remain."""
+    pairs = list(zip(tick_pixels, tick_values))
+    while len(pairs) >= _MIN_LABELS:
+        cal = fit_axis(axis, [p for p, _ in pairs], [v for _, v in pairs])
+        if cal.ok:
+            return cal
+        pairs.remove(max(pairs, key=lambda pv: abs(cal.pixel_to_data(pv[0]) - pv[1])))
+    return None
