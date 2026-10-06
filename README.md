@@ -83,7 +83,7 @@ assistant is just writing a function and registering it as a tool.
 | Area | Choice |
 |---|---|
 | Language | Python 3.11+ |
-| LLM | Anthropic API — Claude Sonnet 5 (extraction, with code execution + Files API; Batch API optional) · Claude Haiku (assistant, tool-calling) |
+| LLM | Anthropic API — Claude Sonnet 5.5 (extraction, with code execution + Files API; Batch API optional) · Claude Haiku (assistant, tool-calling) |
 | UI | Streamlit (multi-page) |
 | Database | SQLite (read-only mode for consumers) + a `v_current_best` view |
 | PDF / figures | pdfplumber · pypdf · NumPy / SciPy / scikit-image (deterministic curve extraction) |

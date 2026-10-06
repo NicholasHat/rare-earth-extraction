@@ -10,6 +10,7 @@ from __future__ import annotations
 
 PRICES = {
     # model: (input, output, cache write, cache read)
+    "claude-sonnet-5-5": (2.00, 10.00, 2.50, 0.20),
     "claude-sonnet-5": (2.00, 10.00, 2.50, 0.20),
     "claude-opus-4-8": (5.00, 25.00, 6.25, 0.50),
 }
