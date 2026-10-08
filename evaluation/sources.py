@@ -123,8 +123,10 @@ def load_local(stem: str, runs_dir: Path) -> Result:
 def _local_figures(panels: list[dict], debug_csv: Path) -> list[dict]:
     """The local run's per-figure record in provenance.summarise's shape:
     rows per figure from rows_debug.csv, and the skip reasons of its panels."""
-    counts = (pd.read_csv(debug_csv)["_figure"].dropna().astype(int).astype(str).value_counts().to_dict()
-              if debug_csv.exists() and debug_csv.stat().st_size else {})
+    try:
+        counts = pd.read_csv(debug_csv)["_figure"].dropna().astype(int).astype(str).value_counts().to_dict()
+    except (FileNotFoundError, pd.errors.EmptyDataError):   # a 0-row run writes a bare newline
+        counts = {}
     by_figure: dict[str, set[str]] = {}
     for p in panels:
         key = str(p.get("figure")) if p.get("figure") is not None else "?"
