@@ -5,6 +5,7 @@
 data/incoming/
 data/staging/
 data/exports/
+data/comparisons/
 data/*.db
 data/*.db-wal
 data/*.db-shm
