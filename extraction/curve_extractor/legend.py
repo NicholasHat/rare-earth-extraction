@@ -19,7 +19,7 @@ from raster.find_panels. scikit-image is imported lazily (match_markers only).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy import ndimage
@@ -49,7 +49,11 @@ class Swatch:
     y: float
     shape: str | None       # square / circle / triangle / diamond (None: unclear)
     fill: str               # solid / open
-    template: np.ndarray    # float ink mask, the swatch as drawn
+    # The swatch as drawn (float ink mask). Kept out of repr: printing a list
+    # of swatches in the sandbox dumped every template as an array literal —
+    # 1.3 MB of stdout that the extraction then re-read on every later turn
+    # (Banda 2012 and Liu 2014, 2026-10-07: 860k and 640k cache-write tokens).
+    template: np.ndarray = field(repr=False)
 
     @property
     def description(self) -> str:

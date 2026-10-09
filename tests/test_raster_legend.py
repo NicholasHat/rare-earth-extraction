@@ -49,6 +49,8 @@ def test_markers_are_matched_to_the_legend_swatch_they_look_like():
     markers = legend.match_markers(img, panel, swatches)
     by_swatch = {i: sum(1 for m in markers if m.swatch == i) for i in range(2)}
     assert by_swatch == {0: 5, 1: 5}
+    # Printing swatches in the sandbox must not dump their templates into the transcript.
+    assert len(repr(swatches)) < 200 and "template" not in repr(swatches)
 
 
 @pytest.mark.parametrize("shape", ["square", "circle", "triangle", "diamond"])
