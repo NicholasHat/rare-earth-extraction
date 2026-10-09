@@ -13,9 +13,12 @@ injected like the curve pre-pass block — never folded into the pinned prompt.
 
 The guide is the contract between this code and the prompt: it names the
 functions the prompt's raster steps tell the model to call, and states the
-sandbox facts the model otherwise probes for (checked live 2026-09-25: PyMuPDF
-1.21, numpy, scipy, PIL, scikit-image and OpenCV work; pdfplumber does not
-import; there is no internet, so nothing can be installed).
+sandbox facts the model otherwise probes for. Those facts drift: PyMuPDF
+worked and pdfplumber did not on 2026-09-25; on 2026-10-07 (from the batch
+transcripts) PyMuPDF was gone and pdfplumber 0.11, pypdfium2 4.30, numpy 2.2,
+scipy, scikit-image 0.23 and OpenCV 4.12 worked. So rendering goes through
+`curve_extractor.pages.render`, which uses whichever library is there, and the
+guide names no renderer. There is no internet, so nothing can be installed.
 """
 from __future__ import annotations
 
@@ -54,24 +57,23 @@ unzip -oq "$INPUT_DIR/{FILENAME}" -d /tmp/toolkit && ls "$INPUT_DIR"/*.pdf
 ```
 ```python
 import sys; sys.path.insert(0, "/tmp/toolkit")
-from curve_extractor import raster, legend, calibrate, fits
+from curve_extractor import pages, raster, legend, calibrate, fits
 ```
-**Environment facts — do not probe or reinstall:** PyMuPDF (`import fitz`), numpy, scipy, PIL,
-scikit-image and OpenCV are installed and work. `pdfplumber` does not import here; do not repair it —
-render with PyMuPDF. There is no internet access, so nothing can be installed.
+**Environment facts — do not probe or reinstall:** numpy, scipy, scikit-image, OpenCV and
+`pdfplumber` (vector drawing objects and text with positions: `page.curves`, `page.rects`,
+`page.chars`) work. Render only with `pages.render` (below) — it uses whichever PDF renderer the
+sandbox has; do not test which libraries import. There is no internet access, so nothing can be
+installed. **Print counts and short summaries, never whole arrays or lists of objects** — every
+printed character is re-read on every later step.
 **You cannot see images you create here.** A render is pixels for your code only; opening a PNG
 with the file viewer returns base64 text that every later step re-reads. Read legends, marker
 shapes, panel layout, tick labels and in-plot text from the PDF document in this conversation.
 
 **Render the whole figure** at 300 dpi — every pixel threshold below assumes that scale (the
-DETERMINISTIC CURVE ANALYSIS block gives each raster figure's bbox in PDF points, origin top-left,
-same convention as `fitz.Rect`):
+DETERMINISTIC CURVE ANALYSIS block gives each raster figure's bbox in PDF points, origin top-left —
+pdfplumber's coordinates, which `pages.render` takes as they are):
 ```python
-import fitz, numpy as np
-doc = fitz.open(PDF_PATH)          # keep this name: the sandbox's PyMuPDF 1.21 orphans a page
-page = doc[PAGE_INDEX]             # whose document was garbage-collected
-pix = page.get_pixmap(dpi=300, clip=fitz.Rect(x0, top, x1, bottom), colorspace=fitz.csGRAY)
-arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)   # 0 = ink
+arr = pages.render(PDF_PATH, PAGE_INDEX, (x0, top, x1, bottom))   # uint8 grayscale, 0 = ink, 300 dpi
 ```
 
 **Digitise a scanned figure** — all on that one array, pixel coordinates of it:

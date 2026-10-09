@@ -105,9 +105,11 @@ def _template_tools():
 
 def render_region(page, bbox, dpi: int = _RENDER_DPI) -> np.ndarray:
     """Render `bbox` (pdf points) of `page` to a grayscale numpy array."""
-    pil = page.to_image(resolution=dpi).original.convert("L")
+    from .pages import crop_origin
+    pil = page.to_image(resolution=dpi).original.convert("L")   # renders the crop box only
     sc = dpi / 72.0
-    x0, top, x1, bottom = bbox
+    ox, oy = crop_origin(page)
+    x0, top, x1, bottom = bbox[0] - ox, bbox[1] - oy, bbox[2] - ox, bbox[3] - oy
     crop = pil.crop((int(x0 * sc), int(top * sc), int(x1 * sc), int(bottom * sc)))
     return np.asarray(crop)
 

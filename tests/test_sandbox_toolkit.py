@@ -58,15 +58,17 @@ def test_bundle_imports_and_digitises_without_pdfplumber_or_scikit_image(sandbox
 
 
 def test_guide_names_only_functions_that_exist():
-    from extraction.curve_extractor import calibrate, fits, legend, raster
-    modules = {"raster": raster, "calibrate": calibrate, "legend": legend, "fits": fits}
+    from extraction.curve_extractor import calibrate, fits, legend, pages, raster
+    modules = {"raster": raster, "calibrate": calibrate, "legend": legend, "fits": fits, "pages": pages}
     guide = sandbox_toolkit.guide()
-    named = set(re.findall(r"(raster|calibrate|legend|fits)\.(\w+)\(", guide))
+    named = set(re.findall(r"(raster|calibrate|legend|fits|pages)\.(\w+)\(", guide))
     assert {"find_panels", "find_swatches", "match_markers", "label_centres", "fit_ticks"} <= {f for _, f in named}
     for module, fn in named:
         assert callable(getattr(modules[module], fn)), f"{module}.{fn}"
     assert sandbox_toolkit.FILENAME in guide
-    assert "pdfplumber" in guide and "fitz" in guide     # the environment facts the model used to probe for
+    assert ("pages", "render") in named
+    assert "pdfplumber" in guide                          # works in the sandbox since 2026-10; says so
+    assert "fitz" not in guide and "PyMuPDF" not in guide # gone since 2026-10; the guide names no renderer
 
 
 def test_guide_never_tells_the_model_to_install_or_view_images():

@@ -427,6 +427,7 @@ def test_effort_is_sent_only_when_configured():
 
 def test_user_instruction_states_the_sandbox_facts_instead_of_inviting_probes():
     text = anthropic_client._USER_INSTRUCTION
-    assert "$INPUT_DIR/paper.pdf" in text and "fitz" in text
+    assert "$INPUT_DIR/paper.pdf" in text and "pages.render" in text
+    assert "fitz" not in text and "PyMuPDF" not in text      # the sandbox's renderer changes; the toolkit picks it
     assert "install any" not in text and "list the working directory" not in text
     assert "no internet" in text and "cannot see images" in text
