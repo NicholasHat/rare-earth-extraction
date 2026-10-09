@@ -21,7 +21,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from calculator.atomic_mass import ATOMIC_MASS_G_PER_MOL
+from calculator.atomic_mass import ATOMIC_MASS_G_PER_MOL, REE_ELEMENTS
 
 from . import vocab
 from .report import QAReport, Severity
@@ -87,6 +87,7 @@ def run(
     if len(df) == 0:
         return report  # nothing else is meaningful on an empty extraction
 
+    _element_scope(df, report)
     _row_count_sanity(df, figure_is_curve, report)
     _axis_bounds(df, report)
     _monotonicity(df, report)
@@ -136,6 +137,10 @@ def _element_groups(df: pd.DataFrame):
 _CURVE_KEY_COLUMNS = [
     "Extractant",
     "Extractant Conc. (mM)",
+    # The same element at two feed levels is two experiments (Draa 2004 plots
+    # one loading at 10 mg/L in Fig. 3 and at 1.2e-4 M in Fig. 4).
+    "RRE composition (ppm)",
+    "RRE composition (mM)",
     "Extract Temperature (oC)",
     "Acid Solution conc. (M)",
     "Leaching time (minute)",
@@ -401,6 +406,41 @@ def _sampled_from_line(df: pd.DataFrame, report: QAReport) -> None:
             )
 
 
+def _element_scope(df: pd.DataFrame, report: QAReport) -> None:
+    """The database holds rare earth elements (La–Lu, Y, Sc) only; a row for
+    any other metal is out of scope (the 2026-10-07 batch extracted 84 rows
+    from a Pb paper)."""
+    if ELEMENT_COLUMN not in df.columns:
+        return
+    elements = df[ELEMENT_COLUMN].astype("string").str.strip()
+    bad = elements.notna() & ~elements.isin(REE_ELEMENTS)
+    if bad.any():
+        rows = df.index.get_indexer(df.index[bad]) + 1
+        report.add(
+            "element_scope",
+            Severity.RED,
+            f"{len(rows)} row(s) are for {', '.join(sorted(set(elements[bad])))} — not a rare earth element "
+            f"(La–Lu, Y, Sc); this database holds rare earths only: {_rows(rows)}.",
+            rows=rows,
+        )
+
+
+def _rounding_half_unit(values: pd.Series) -> pd.Series:
+    """Half a unit in the last decimal each value is written to (0.2 -> 0.05,
+    0.178 -> 0.0005): how far a correctly rounded value may sit from the
+    exact one. A whole number gets no allowance — "1" for 0.72 mM, or a ratio
+    of 9 for 8.79, could be rounding or an error, and the prompt asks for
+    three significant figures, so it stays flagged."""
+    def half(v):
+        if pd.isna(v):
+            return np.nan
+        text = f"{float(v):.10g}"
+        if "." not in text or "e" in text:
+            return 0.0
+        return 0.5 * 10.0 ** -len(text.split(".")[1])
+    return values.map(half)
+
+
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(np.nan, index=df.index)
 
@@ -409,7 +449,9 @@ def _arithmetic(df: pd.DataFrame, report: QAReport) -> None:
     """Derived columns must agree with what they derive from, row by row:
     RRE mM = ppm / the element's atomic mass, and molar ratio = extractant
     mM / RRE mM (per element — the prompt's Step 8). The model computes both;
-    a row where they disagree has at least one wrong number."""
+    a row where they disagree has at least one wrong number. A value may sit
+    off by its own rounding — a ratio of 0.178 written as 0.2 is not an error
+    (four papers in the 2026-10-07 batch were flagged red for exactly that)."""
     mass = df[ELEMENT_COLUMN].map(ATOMIC_MASS_G_PER_MOL) if ELEMENT_COLUMN in df.columns else None
     if mass is None:
         return
@@ -419,7 +461,8 @@ def _arithmetic(df: pd.DataFrame, report: QAReport) -> None:
         ("mM", mm, ppm / mass, "RRE composition (mM) ≠ ppm ÷ atomic mass"),
         ("ratio", ratio, conc / mm, "Molar ratio of EX/REE ≠ Extractant Conc. (mM) ÷ RRE composition (mM)"),
     ):
-        bad = ((got - expected).abs() > ARITH_REL_TOL * expected.abs()) & got.notna() & expected.notna()
+        allowed = np.maximum(ARITH_REL_TOL * expected.abs(), _rounding_half_unit(got))
+        bad = ((got - expected).abs() > allowed) & got.notna() & expected.notna()
         if bad.any():
             rows = df.index.get_indexer(df.index[bad]) + 1
             report.add(

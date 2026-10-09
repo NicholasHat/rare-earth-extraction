@@ -371,3 +371,24 @@ def test_a_total_feed_copied_onto_each_element_is_flagged():
     rows = [r for el in ("Ce", "Pr", "Nd", "Sm") for r in _feed_rows(el, None, 1.9, conc=1000.0)]
     flags = [f for f in checks.run(_df(rows), [], figure_is_curve=True).ambers if f.check == "feed_total"]
     assert len(flags) == 1 and "0.475" in flags[0].message
+
+
+def test_a_non_rare_earth_element_is_red():
+    rows = _feed_rows("Pb", 10.0, 10.0 / 207.2, conc=7.0) + _feed_rows("La", 100.0, 100.0 / 138.91)
+    flags = [f for f in checks.run(_df(rows), [], figure_is_curve=True).reds if f.check == "element_scope"]
+    assert len(flags) == 1 and "Pb" in flags[0].message and len(flags[0].rows) == 8
+
+
+def test_a_ratio_rounded_to_its_printed_precision_is_not_an_arithmetic_error():
+    mm = 781 / 138.91                                            # 5.622 mM La
+    rows = _feed_rows("La", 781.0, round(mm, 3), conc=1.0, ratio=0.2)   # 1 / 5.622 = 0.178, printed 0.2
+    assert not any(f.check == "arithmetic" for f in checks.run(_df(rows), [], figure_is_curve=True).flags)
+    rows = _feed_rows("La", 781.0, round(mm, 3), conc=1.0, ratio=0.25)  # 0.25 is not 0.178 rounded
+    assert any(f.check == "arithmetic" for f in checks.run(_df(rows), [], figure_is_curve=True).reds)
+
+
+def test_one_element_at_two_feed_levels_is_two_curves():
+    rows = _feed_rows("La", 10.0, 10.0 / 138.91) + [
+        {**r, "Extract%": 95.0 - r["Extract%"]} for r in _feed_rows("La", 25.0, 25.0 / 138.91)]
+    flags = checks.run(_df(rows), [], figure_is_curve=True).flags
+    assert not any(f.check in ("monotonicity", "duplicate_rows") for f in flags)
