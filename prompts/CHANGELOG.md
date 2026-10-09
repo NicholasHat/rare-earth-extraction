@@ -4,7 +4,29 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v13 — say where each row came from and why any figure was skipped; raster steps use the toolkit's legend workflow (current pinned default)
+## extraction_v14 — the errors the 2026-10-07 ten-paper audit found; no PDF library named (current pinned default)
+Checked against the PDFs' own vector geometry, v13's rows were exact on the
+clean papers, but:
+- **Phase ratio.** A resin paper's log D (mL/g) was converted with
+  `100·D/(1+D)`, overstating low-pH %E up to fivefold (Wang 1998). Step 7 now
+  converts every D / K_d with the experiment's R — V_aq/V_org liquid–liquid,
+  V/m in mL/g for a solid sorbent, never 1 for a solid — and Step 1 asks for
+  the volumes and masses. A solid-phase figure with no stated V/m gets no rows.
+- **Rare earths only.** A Pb paper produced 84 rows; Step 1 now scopes rows to
+  La–Lu, Y, Sc and other metals get none (QA's `element_scope` enforces it).
+- **Feed totals.** v13's pitfall row told the model to put a total mM in the
+  per-element column (P507: 0.21 M total copied onto 14 elements). Now: this
+  element's concentration, computed from a composition only when its basis is
+  stated, else blank.
+- **Markers at their own x.** Values "read visually and anchored to the text"
+  snapped to the caption's concentration list and missed 15 markers (Banda
+  2012b). Step 5: one row per located marker, at its own x.
+- **Precision.** Derived numbers to ≥ 3 significant figures (molar ratios had
+  been rounded to 0.2, tripping QA's arithmetic check).
+- **No PDF library named.** PyMuPDF left the sandbox; snippets use pdfplumber
+  for vector objects and the toolkit's `pages.render` to render.
+
+## extraction_v13 — say where each row came from and why any figure was skipped; raster steps use the toolkit's legend workflow
 - **Provenance.** The OUTPUT CONTRACT gains two keys beside `text_endpoints`:
   `row_figures` (the source figure of each row, in row order) and `figures`
   (every numbered figure, whether it was digitised, and a reason when not).
