@@ -28,6 +28,7 @@ class Result:
     source: str                      # "staged" | "approved" | "failed" | "local" | "missing"
     df: pd.DataFrame | None = None
     info: dict = field(default_factory=dict)
+    figures: list[str] | None = None   # source figure of each row of df, when the pipeline records it
 
     @property
     def rows(self) -> int:
@@ -88,7 +89,7 @@ def load_claude(sha: str) -> Result:
             "prompt_version": r.prompt_version, "model": r.model, "usage": usage, "via_batch": r.via_batch,
             "cost_usd": cost.usd(usage, r.model, via_batch=r.via_batch),
             "figures": provenance.summarise(r.figures, r.row_figures),   # empty before extraction_v13
-        })
+        }, figures=r.row_figures if r.row_figures and len(r.row_figures) == len(r.df) else None)
     approved = _claude_approved(sha)
     if approved is not None:
         return approved
@@ -117,7 +118,19 @@ def load_local(stem: str, runs_dir: Path) -> Result:
         info["panels"] = len(panels)
         info["panels_skipped"] = sum(1 for p in panels if p.get("skipped"))
         info["figures"] = _local_figures(panels, run / "rows_debug.csv")
-    return Result("local", coerce_schema(pd.read_csv(rows)), info)
+    df = coerce_schema(pd.read_csv(rows))
+    return Result("local", df, info, _local_row_figures(run / "rows_debug.csv", len(df)))
+
+
+def _local_row_figures(debug_csv: Path, n_rows: int) -> list[str] | None:
+    """rows_debug.csv is rows.csv plus provenance, row for row."""
+    try:
+        figs = pd.read_csv(debug_csv)["_figure"]
+    except (FileNotFoundError, KeyError, pd.errors.EmptyDataError):
+        return None
+    if len(figs) != n_rows:
+        return None
+    return [f"Fig. {int(f)}" if pd.notna(f) else "" for f in figs]
 
 
 def _local_figures(panels: list[dict], debug_csv: Path) -> list[dict]:

@@ -86,6 +86,11 @@ def test_compare_writes_summary_and_report(tmp_path, monkeypatch):
     assert row["claude_rows"] == 6 and row["local_rows"] == 12 and row["matched"] == 6
     assert row["local_minutes"] == 4.2 and row["claude_cost_usd"] == 1.23
     assert "Only local has: La|cyanex272 (6)" in (out / "report.md").read_text()
+    sheets = pd.read_excel(out / "excel" / "paper_one.xlsx", sheet_name=None)
+    assert list(sheets) == ["Side by side", "Claude (all columns)", "Local (all columns)"]
+    side = sheets["Side by side"]
+    assert side["Status"].value_counts().to_dict() == {"matched": 6, "local only": 6}
+    assert side.loc[side["Status"] == "matched", "Δ Extract% (local − claude)"].abs().max() == 0
 
 
 def test_report_lists_rows_per_figure_and_why_a_figure_gave_none(tmp_path, monkeypatch):

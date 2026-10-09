@@ -8,8 +8,10 @@ stem in the local pipeline's run directory. Both tables go through the same
 QA checks; then their rows are matched against each other and, when
 `--ref-dir` holds `<stem>.csv`, against that reference.
 
-Writes to --out: summary.csv (one row per paper), <stem>.json (full detail)
-and report.md. Read-only: no API call, nothing staged or merged.
+Writes to --out: summary.csv (one row per paper), <stem>.json (full detail),
+report.md, and excel/<stem>.xlsx — both pipelines' rows side by side plus
+each one's full table, for checking against the paper by hand. Read-only:
+no API call, nothing staged or merged.
 """
 from __future__ import annotations
 
@@ -46,10 +48,75 @@ def _qa(result: sources.Result) -> dict:
             "red_checks": sorted({f.check for f in report.reds})}
 
 
-def compare_paper(pdf: Path, local_runs: Path | None, ref_dir: Path | None) -> dict:
+_SIDE_COLUMNS = [match.EL, "Extractant", match.CONC, "pH", "Extract%", "RRE composition (ppm)",
+                 "Acid Solution conc. (M)", "Leaching time (minute)"]
+
+
+def _with_figures(r: sources.Result) -> pd.DataFrame:
+    df = r.df.copy()
+    df.insert(0, "Figure", r.figures if r.figures else "")
+    return df
+
+
+def side_by_side(claude: sources.Result, local: sources.Result) -> pd.DataFrame:
+    """One line per matched pair, then each side's unmatched rows — for
+    checking the two pipelines against the paper by hand."""
+    a, b = _with_figures(claude), _with_figures(local)
+    pairs = match.match(claude.df, local.df)
+    cols = ["Figure"] + _SIDE_COLUMNS
+
+    def line(status, ra, rb):
+        out = {"Status": status}
+        for c in cols:
+            out[f"Claude: {c}"] = ra[c] if ra is not None else None
+            out[f"Local: {c}"] = rb[c] if rb is not None else None
+        ea, eb = out["Claude: Extract%"], out["Local: Extract%"]
+        out["Δ Extract% (local − claude)"] = eb - ea if pd.notna(ea) and pd.notna(eb) else None
+        return out
+
+    matched_a, matched_b = {i for i, _ in pairs}, {j for _, j in pairs}
+    lines = ([line("matched", a.loc[i], b.loc[j]) for i, j in pairs]
+             + [line("Claude only", a.loc[i], None) for i in a.index if i not in matched_a]
+             + [line("local only", None, b.loc[j]) for j in b.index if j not in matched_b])
+    order = ["Status"] + [f"{side}: {c}" for c in cols for side in ("Claude", "Local")] \
+        + ["Δ Extract% (local − claude)"]
+    df = pd.DataFrame(lines, columns=order)
+    el = df[f"Claude: {match.EL}"].fillna(df[f"Local: {match.EL}"])
+    ex = df["Claude: Extractant"].fillna(df["Local: Extractant"])
+    conc = df[f"Claude: {match.CONC}"].fillna(df[f"Local: {match.CONC}"])
+    status = df["Status"].map({"matched": 0, "Claude only": 1, "local only": 2})
+    return df.assign(_s=status, _e=el, _x=ex, _c=conc).sort_values(["_s", "_e", "_x", "_c"]) \
+        .drop(columns=["_s", "_e", "_x", "_c"])
+
+
+def write_workbook(path: Path, claude: sources.Result, local: sources.Result) -> None:
+    """<paper>.xlsx: Side by side, then each pipeline's full 26-column table."""
+    sheets = {}
+    if claude.df is not None and local.df is not None:
+        sheets["Side by side"] = side_by_side(claude, local)
+    if claude.df is not None:
+        sheets["Claude (all columns)"] = _with_figures(claude)
+    if local.df is not None:
+        sheets["Local (all columns)"] = _with_figures(local)
+    if not sheets:
+        return
+    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        for name, df in sheets.items():
+            df.to_excel(xw, sheet_name=name, index=False)
+            ws = xw.sheets[name]
+            ws.freeze_panes = "B2"
+            for col in ws.columns:
+                width = max(len(str(c.value)) if c.value is not None else 0 for c in col[:200])
+                ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 8), 40)
+
+
+def compare_paper(pdf: Path, local_runs: Path | None, ref_dir: Path | None,
+                  xlsx_dir: Path | None = None) -> dict:
     sha = hashlib.sha256(pdf.read_bytes()).hexdigest()
     claude = sources.load_claude(sha)
     local = sources.load_local(pdf.stem, local_runs) if local_runs else sources.Result("missing")
+    if xlsx_dir is not None:
+        write_workbook(xlsx_dir / f"{pdf.stem}.xlsx", claude, local)
     detail: dict = {"paper": pdf.stem, "sha256": sha,
                     "claude": {"source": claude.source, "rows": claude.rows, **claude.info, "qa": _qa(claude)},
                     "local": {"source": local.source, "rows": local.rows, **local.info, "qa": _qa(local)}}
@@ -153,12 +220,14 @@ def main(argv: list[str] | None = None) -> int:
     if not pdfs:
         print("no PDFs found", file=sys.stderr)
         return 1
-    args.out.mkdir(parents=True, exist_ok=True)
-    details = [compare_paper(p, args.local_runs, args.ref_dir) for p in pdfs]
+    xlsx_dir = args.out / "excel"
+    xlsx_dir.mkdir(parents=True, exist_ok=True)
+    details = [compare_paper(p, args.local_runs, args.ref_dir, xlsx_dir) for p in pdfs]
     for d in details:
         (args.out / f"{d['paper']}.json").write_text(json.dumps(d, indent=1, default=str))
     summary = pd.DataFrame([_summary_row(d) for d in details])
     summary.to_csv(args.out / "summary.csv", index=False)
+    summary.to_excel(xlsx_dir / "_summary.xlsx", index=False)
     (args.out / "report.md").write_text(report_md(details, summary))
     with pd.option_context("display.width", 200, "display.max_columns", 30):
         print(summary.to_string(index=False))
