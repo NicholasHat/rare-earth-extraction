@@ -34,12 +34,17 @@ try:
 finally:
     conn.close()
 
+# Only openly-licensed papers can be (re-)approved (database/merge.py); say so
+# plainly for a paper merged before licences were recorded.
+papers_df["license"] = papers_df["license"].fillna("none recorded")
+summary_df["license"] = summary_df["license"].fillna("none recorded")
+
 m1, m2, m3 = st.columns(3)
 m1.metric("Papers", n_papers)
 m2.metric("Approved runs", n_runs)
 m3.metric("Rows in current-best view", n_best)
 
-write_mode = "🔒 password required" if config.REQUIRE_PASSWORD else "🔓 open (no password)"
+write_mode = "password required" if config.REQUIRE_PASSWORD else "open (no password)"
 st.caption(
     f"Pinned prompt: `{config.EXTRACTION_PROMPT_VERSION}` &nbsp;·&nbsp; "
     f"Model: `{config.EXTRACTION_MODEL}` &nbsp;·&nbsp; Write mode: {write_mode}"
@@ -75,6 +80,11 @@ with tab_papers:
         st.info("No papers yet — upload one on the home page.")
     else:
         st.dataframe(papers_df, width="stretch", hide_index=True)
+        if (papers_df["license"] == "none recorded").any():
+            st.caption(
+                "A paper with no licence recorded keeps its rows, but can't be re-approved until "
+                "an open licence is recorded for it."
+            )
 
 with tab_runs:
     if runs_df.empty:

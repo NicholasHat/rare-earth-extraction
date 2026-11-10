@@ -1,8 +1,9 @@
 """REE Extraction Dashboard — home page (Pillar A).
 
-Batch PDF upload: one or more PDFs in -> one 26-column table per paper out,
-each with automatic QA and manual review before merging into the master DB.
-Run with:  streamlit run app.py
+Batch API jobs (from `python -m extraction.bulk` or submitted here) and one-off
+PDF uploads -> one extraction table per paper, each with automatic QA and
+manual review before merging into the master DB. Only openly-licensed papers
+can be merged (database/merge.py). Run with:  streamlit run app.py
 
 This page is the only writer of the master DB (plan §6); the Database,
 Calculator and Lab Assistant pages under pages/ are read-only consumers.
@@ -12,7 +13,8 @@ module is UI only.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -21,11 +23,13 @@ import streamlit as st
 import auth
 import config
 from database import connection, merge, naming, papers_repo
-from extraction import provenance, runner, staging
+from extraction import anthropic_client, batch_jobs, provenance, runner, staging
 from extraction.prompt_loader import PromptNotReadyError
 from extraction.runner import ExtractionResult
-from extraction.staging import BatchJob, PaperRef, StagedPaper
-from ingestion import dedup, doi as doi_mod, pdf_inspect, upload
+from extraction.staging import PaperRef, StagedPaper
+from evaluation.cost import result_usd
+from ingestion import dedup, doi as doi_mod, licensing, pdf_inspect, upload
+from ingestion.licensing import License
 from validation import schema
 from validation.report import ReviewTier, Severity, review_tier
 
@@ -55,10 +59,16 @@ def _first_value(df: pd.DataFrame, col: str):
 def _format_usage(result: ExtractionResult) -> str:
     total_in = result.input_tokens + result.cache_creation_input_tokens + result.cache_read_input_tokens
     cached_pct = f"{100 * result.cache_read_input_tokens / total_in:.0f}%" if total_in else "0%"
-    return (
+    text = (
         f"{total_in:,} input tokens ({cached_pct} served from cache) · "
         f"{result.output_tokens:,} output tokens"
     )
+    cost = result_usd(result)
+    if cost is not None:
+        text += f" · ≈ ${cost:.2f}" + (" (Batch API)" if result.via_batch else "")
+    if result.transcript:
+        text += f" · transcript: {result.transcript}"
+    return text
 
 
 def _tier_for(staged: StagedPaper) -> ReviewTier:
@@ -106,6 +116,7 @@ def _preview(uploaded_file, conn) -> _Preview:
             doi=parsed_doi,
             filename=uploaded_file.name,
             meta=pdf_inspect.inspect(pdf_bytes),
+            license=licensing.from_manifest(sha),
         ),
         pdf_bytes=pdf_bytes,
         status=f"existing (paper_id={existing.paper_id})" if existing else "new",
@@ -117,7 +128,14 @@ def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
     for i, p in enumerate(selected, start=1):
         with st.status(f"[{i}/{len(selected)}] Extracting {p.paper.filename}…", expanded=False):
             try:
-                result = runner.extract_paper(p.pdf_bytes, figure_is_curve=figure_is_curve)
+                with staging.claim(p.paper.sha):   # a double click can't pay for it twice
+                    result = runner.extract_paper(p.pdf_bytes, figure_is_curve=figure_is_curve)
+                    # Persist before touching Streamlit again (see below), and
+                    # before the claim is released.
+                    staging.stage(p.paper, figure_is_curve, result)
+            except staging.Busy as e:
+                errors.append((p.paper.filename, str(e)))
+                continue
             except PromptNotReadyError as e:
                 errors.append((p.paper.filename, f"Prompt not ready: {e}"))
                 continue
@@ -125,13 +143,12 @@ def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
                 staging.record_failed_run(p.paper, e)
                 errors.append((p.paper.filename, f"Extraction failed: {e}"))
                 continue
-            # Persist before touching Streamlit again. Closing the status box
-            # (or any st.* call) raises Streamlit's stop signal if the browser
-            # session that started this run has since been replaced — a tab
-            # reload, a sleep/wake reconnect, a page switch — and a result
-            # that only exists in this thread dies with it. On disk, it is
-            # picked up by the review queue on the next page load.
-            staging.stage(p.paper, figure_is_curve, result)
+            # The result was staged above, before touching Streamlit again.
+            # Closing the status box (or any st.* call) raises Streamlit's stop
+            # signal if the browser session that started this run has since
+            # been replaced — a tab reload, a sleep/wake reconnect, a page
+            # switch — and a result that only exists in this thread dies with
+            # it. On disk, it is picked up by the review queue on the next load.
     n_ok = len(selected) - len(errors)
     if n_ok:
         st.success(f"Extracted {n_ok}/{len(selected)} paper(s) — ready for review below.")
@@ -142,76 +159,68 @@ def _run_batch(selected: list[_Preview], figure_is_curve: bool) -> None:
 def _submit_batch_job(
     papers: list[tuple[PaperRef, bytes]], figure_is_curve: bool, qa_feedback: str | None = None
 ) -> None:
-    """Submit papers as one Message Batches API job (50% cheaper, asynchronous).
-    Persists a sidecar so the job can be checked/collected later, including
-    across a server restart. With `qa_feedback` it is a re-extraction: the
+    """Submit papers as one Message Batches API job (50% cheaper, asynchronous)
+    through extraction/batch_jobs.py — the same code path as the headless
+    `python -m extraction.bulk`. With `qa_feedback` it is a re-extraction: the
     job's result replaces the paper's staged one when it is collected."""
     try:
-        submission, items = runner.submit_batch(
-            [(paper.sha, pdf_bytes) for paper, pdf_bytes in papers],
-            figure_is_curve=figure_is_curve, qa_feedback=qa_feedback,
+        outcome = batch_jobs.submit(
+            papers, figure_is_curve=figure_is_curve, qa_feedback=qa_feedback,
+            replacing_staged=qa_feedback is not None,
         )
     except PromptNotReadyError as e:
         st.error(f"Prompt not ready: {e}")
         return
+    except anthropic_client.CreditExhausted as e:
+        st.error(str(e))
+        return
     except Exception as e:
         st.error(f"Batch submission failed: {e}")
         return
-    BatchJob(
-        batch_id=submission.batch_id,
-        file_ids=submission.file_ids,
-        toolkit_file_id=submission.toolkit_file_id,
-        items=items,
-        papers={paper.sha: paper for paper, _ in papers},
-    ).save()
+    for sha, reason in outcome.skipped.items():
+        st.warning(f"Not submitted: {sha[:12]}… — {reason}.")
+    if outcome.job is None:
+        return
     st.success(
-        f"Batch submitted: {len(papers)} paper(s), batch_id={submission.batch_id}. Batches usually "
+        f"Batch submitted: {len(outcome.job.items)} paper(s), batch_id={outcome.job.batch_id}. Batches usually "
         "finish within an hour (up to 24h) — come back to 'Batch API jobs' and click "
         "'Check status' to retrieve results once it's done."
     )
 
 
-def _collect_batch_job(job: BatchJob) -> None:
+def _collect_batch_job(batch_id: str) -> None:
     """Once a batch has ended, parse + QA its results and fold successes into
-    the normal staging/review queue — same shape _run_batch produces.
+    the normal staging/review queue (extraction/batch_jobs.collect). A paper
+    that fails stays on the job, visible across reruns and restarts; the job
+    and its uploads are cleaned up once every paper has landed.
 
-    A paper whose result fails to parse/QA is recorded on the job (which keeps
-    only the failed papers) so it stays visible across reruns and server
-    restarts, instead of a one-shot st.error that flashes and is gone the
-    moment the immediate st.rerun() below fires. The sidecar and its Files
-    API uploads are only cleaned up once every item has landed in the review
-    queue — a batch with failures is never silently discarded.
-
-    Caller must hold the collection lock (job.begin_collection()) — see
-    render_batch_jobs.
-    """
+    The outcome is kept in session state and shown by render_batch_jobs on the
+    next run: the caller reruns straight after, which would wipe any message."""
     try:
-        results = runner.collect_batch(job.batch_id, job.items, job.file_ids, job.toolkit_file_id)
+        outcome = batch_jobs.collect(batch_id)
     except Exception as e:
-        job.release_lock()
-        st.error(f"Could not collect batch results: {e}")
+        st.session_state["batch_notice"] = ("error", f"Could not collect batch results: {e}", None)
         return
-
-    n_ok = 0
-    errors: dict[str, str] = {}
-    for sha, result in results.items():
-        if isinstance(result, Exception):
-            staging.record_failed_run(job.papers[sha], result, batch_id=job.batch_id)
-            errors[sha] = str(result)
-            continue
-        staging.stage(job.papers[sha], job.items[sha].figure_is_curve, result)
-        n_ok += 1
-
-    if errors:
-        job.record_failures(errors)
+    if outcome.status == "busy":
+        notice = ("info", "This batch is being collected by another session or the bulk runner — wait for it.", None)
+    elif outcome.status == "not_ended":
+        notice = ("info", f"Batch {batch_id}: still processing (status: {outcome.processing_status}). "
+                          "Check back later.", None)
+    elif outcome.status == "gone":
+        notice = ("info", f"Batch {batch_id} was already collected or discarded.", None)
     else:
-        runner.cleanup_batch_files(job.file_ids, job.toolkit_file_id)
-        job.delete()
-
-    if n_ok:
-        st.success(
-            f"Batch {job.batch_id}: {n_ok}/{len(results)} paper(s) extracted — ready for review below."
-        )
+        n_ok = sum(1 for p in outcome.papers if p.staged)
+        rows = pd.DataFrame([
+            {"File": p.filename, "Staged": p.staged, "Rows": p.rows, "Red": p.reds, "Amber": p.ambers,
+             "Cost (USD)": p.cost_usd, "Error": p.error or "", "Transcript": p.transcript or ""}
+            for p in outcome.papers
+        ])
+        notice = ("success" if n_ok == len(outcome.papers) else "warning",
+                  f"Batch {batch_id}: {n_ok}/{len(outcome.papers)} paper(s) staged for review.", rows)
+    if outcome.credit_exhausted:
+        notice = ("error", notice[1] + " The Anthropic credit balance ran out. Every completed turn is "
+                  "kept — top up and check status again to resume.", notice[2])
+    st.session_state["batch_notice"] = notice
 
 
 def render_failed_runs() -> None:
@@ -232,6 +241,8 @@ def render_failed_runs() -> None:
                             "input_tokens", "output_tokens",
                             "cache_creation_input_tokens", "cache_read_input_tokens",
                         )},
+                        "Credit exhausted": bool(f.get("credit_exhausted")),
+                        "Transcript": f.get("transcript") or "",
                     }
                     for f in failed
                 ]
@@ -240,61 +251,122 @@ def render_failed_runs() -> None:
         )
 
 
+def _render_batch_notice() -> None:
+    """The last collect/reconcile outcome of this session, shown once."""
+    notice = st.session_state.pop("batch_notice", None)
+    if notice is None:
+        return
+    kind, message, rows = notice
+    getattr(st, kind)(message)
+    if rows is not None and not rows.empty:
+        st.dataframe(rows, width="stretch", hide_index=True)
+
+
+def _reconcile() -> None:
+    report = batch_jobs.reconcile()
+    lines = [f"Adopted batch {j.batch_id}." for j in report.adopted]
+    lines += [f"Submission {j.job_id[:8]} never created a batch — cleaned up." for j in report.abandoned]
+    lines += [f"Submission {j.job_id[:8]}: {why}." for j, why in report.unresolved]
+    lines += [f"Untracked batch on the account: {b.batch_id}." for b in report.untracked]
+    if report.api_error:
+        lines.append(f"Could not list batches: {report.api_error}")
+    st.session_state["batch_notice"] = ("info", "  \n".join(lines) or "Nothing to reconcile.", None)
+
+
 def render_batch_jobs() -> None:
     jobs = staging.load_batch_jobs()
-    if not jobs:
+    pending = staging.load_pending_submissions()
+    if not jobs and not pending and "batch_notice" not in st.session_state:
         return
     st.divider()
     st.subheader(f"Batch API jobs ({len(jobs)} in flight)")
+    _render_batch_notice()
+    if pending:
+        st.warning(
+            f"{len(pending)} batch submission(s) are in progress or were interrupted before the API "
+            "answered. Reconciling checks the API's batch list and adopts or cleans up each one."
+        )
+        if st.button("Reconcile with the API", key="batch_reconcile"):
+            _reconcile()
+            st.rerun()
+    now = datetime.now(timezone.utc)
     for batch_id, job in jobs.items():
         with st.container(border=True):
-            st.write(f"**{batch_id}** — {len(job.items)} paper(s), submitted {job.submitted_at}")
+            st.write(f"**{batch_id}** — {len(job.items)} paper(s), submitted {job.submitted_at[:16].replace('T', ' ')}")
+            expires = job.results_expire_at()
+            if expires - now < batch_jobs.EXPIRY_WARNING:
+                st.warning(f"The API deletes this batch's results on {expires:%Y-%m-%d} — collect them before then.")
             for sha, msg in job.errors.items():
                 filename = job.papers[sha].filename if sha in job.papers else sha
                 st.error(f"{filename}: {msg}")
             in_progress = job.collection_in_progress()
             if in_progress:
                 st.info(
-                    "A previous check is still finishing up — this can take a while "
-                    "if a paper needs a synchronous pause_turn continuation. Please "
-                    "wait rather than checking again; re-checking now would restart "
-                    "that (expensive) continuation from scratch."
+                    "Being collected right now (here, in another session, or by the bulk runner) — "
+                    "this can take a while if a paper needs a synchronous continuation."
                 )
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Check status", key=f"batch_status_{batch_id}", disabled=in_progress):
-                    try:
-                        status = runner.batch_status(batch_id)
-                    except Exception as e:
-                        st.error(f"Could not check batch status: {e}")
-                        continue
-                    if status != "ended":
-                        st.info(f"Still processing (status: {status}). Check back later.")
-                        continue
-                    job.begin_collection()
                     with st.spinner(
                         "Collecting batch results — this can take a while if any "
                         "paper needs an extra synchronous digitization round..."
                     ):
-                        _collect_batch_job(job)
+                        _collect_batch_job(batch_id)
                     st.rerun()
             with col2:
                 if job.errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):
-                    runner.cleanup_batch_files(job.file_ids, job.toolkit_file_id)
-                    job.delete()
+                    try:
+                        batch_jobs.discard(batch_id)
+                    except staging.Busy as e:
+                        st.session_state["batch_notice"] = ("error", str(e), None)
                     st.rerun()
 
 
 # --------------------------------------------------------------------------- #
-# Review + merge queue (one paper at a time, picked from the pending batch)
+# Review + merge queue (one paper at a time, picked from the list of staged papers)
 # --------------------------------------------------------------------------- #
-def _stored_tracking(sha: str, doi: str | None) -> dict[str, str]:
-    """Tracking-sheet fields already on this paper (re-extraction case), '' if none."""
+def _db_paper(sha: str, doi: str | None):
+    """The paper's row in the master DB (re-extraction case), or None."""
     conn = connection.get_conn()
     try:
-        row = papers_repo.find_by_hash(conn, sha) or papers_repo.find_by_doi(conn, doi)
+        return papers_repo.find_by_hash(conn, sha) or papers_repo.find_by_doi(conn, doi)
     finally:
         conn.close()
+
+
+def _license_for(paper: PaperRef) -> License | None:
+    """The licence the merge gate will judge this paper by: the staged one,
+    else the open-access manifest's, else the one on its DB row (mirrors
+    merge.commit_extraction)."""
+    return licensing.resolve(paper.sha, paper.license) or papers_repo.get_license(_db_paper(paper.sha, paper.doi))
+
+
+def render_license(sha: str, paper: PaperRef, lic: License | None) -> None:
+    """The paper's licence, and — when it has no open one — the form to record it."""
+    if lic is not None and lic.is_open:
+        st.caption(f"Licence: {lic.id} ({lic.origin})" + (f" — {lic.evidence}" if lic.evidence else ""))
+        return
+    if lic is None:
+        st.warning("No licence recorded — approval is blocked until an open licence is recorded.")
+    else:
+        st.warning(f"Licence '{lic.id}' is not an open licence — this paper can't be merged.")
+    with st.expander("Record a licence"):
+        col1, col2 = st.columns([1, 3])
+        lic_id = col1.selectbox("Licence", sorted(config.OPEN_LICENSES), key=f"lic_id_{sha}")
+        evidence = col2.text_input("Where the paper states it", key=f"lic_ev_{sha}",
+                                   placeholder="e.g. the licence line on the article's first page")
+        url = st.text_input("Source URL (optional)", key=f"lic_url_{sha}")
+        if st.button("Save licence", key=f"lic_save_{sha}", disabled=not evidence.strip()):
+            if not auth.require_write_access():
+                st.stop()
+            staging.set_license(sha, License.of(lic_id, evidence.strip(), url.strip()))
+            st.rerun()
+
+
+def _stored_tracking(sha: str, doi: str | None) -> dict[str, str]:
+    """Tracking-sheet fields already on this paper (re-extraction case), '' if none."""
+    row = _db_paper(sha, doi)
     return {
         field: (row[field] or "") if row is not None else ""
         for field in papers_repo.TRACKING_FIELDS
@@ -328,16 +400,29 @@ def render_tracking_inputs(sha: str, doi: str | None) -> dict[str, str]:
     return tracking
 
 
+def _edited_qa(staged: StagedPaper, edited_clean: pd.DataFrame):
+    """QA of the rows that would merge — the edited ones, not the extraction's,
+    so an edit (a typed 950 for 95) can't slip past the checks."""
+    return runner.rerun_qa(replace(staged.result, df=edited_clean),
+                           figure_is_curve=staged.figure_is_curve).qa_report
+
+
 def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
              tracking: dict[str, str], note: str, override: bool) -> None:
     paper, result = staged.paper, staged.result
     edited_clean = schema.coerce_schema(edited)
     was_edited = not edited_clean.reset_index(drop=True).equals(result.df.reset_index(drop=True))
     merge_note = note or ("edited in review" if was_edited else None)
+    qa = _edited_qa(staged, edited_clean)
+    if not qa.passed and not override:
+        st.error("The table as edited has red QA flags — fix them, or tick the override box: "
+                 + "; ".join(f"[{f.check}] {f.message}" for f in qa.reds))
+        st.stop()
     conn = connection.get_conn()
     try:
         summary = merge.commit_extraction(
             conn,
+            license=licensing.resolve(paper.sha, paper.license),
             content_sha256=paper.sha,
             pdf_path=paper.pdf_path,
             df=edited_clean,
@@ -345,8 +430,8 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
             prompt_version=result.prompt_version,
             prompt_sha256=result.prompt_sha256,
             model=result.model,
-            qa_passed=result.qa_report.passed,
-            qa_report_json=result.qa_report.to_json(),
+            qa_passed=qa.passed,
+            qa_report_json=qa.to_json(),
             raw_response=result.raw_response,
             doi=paper.doi,
             reference_no=_first_value(edited_clean, "Reference No."),
@@ -362,6 +447,9 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
             cache_creation_input_tokens=result.cache_creation_input_tokens,
             cache_read_input_tokens=result.cache_read_input_tokens,
         )
+    except merge.LicenseRequired as e:
+        st.error(str(e))
+        st.stop()
     finally:
         conn.close()
     # Export the approved per-paper artifact, named to match the tracking
@@ -386,6 +474,120 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
     staging.discard(sha)
 
 
+@dataclass
+class _Editor:
+    """One paper's table editor across reruns. Streamlit forgets a widget's
+    state once a run doesn't draw it, and only the paper under review is drawn,
+    so the edited table is kept here and the editor is re-created from it
+    (under a new key) when the reviewer comes back to the paper."""
+    sha: str
+    base: pd.DataFrame          # the staged table minus dropped rows
+    seed: pd.DataFrame          # what the live editor was created from
+    draft: pd.DataFrame | None = None   # the table as last edited, if edited
+    gen: int = 0
+
+    @property
+    def key(self) -> str:
+        return f"editor_{self.sha}_{self.gen}"
+
+    def changed(self) -> bool:
+        delta = st.session_state.get(self.key) or {}
+        return self.draft is not None or any(delta.get(k) for k in ("edited_rows", "added_rows", "deleted_rows"))
+
+
+def _editors() -> dict[str, _Editor]:
+    return st.session_state.setdefault("review_editors", {})
+
+
+def _table_editor(sha: str, table: pd.DataFrame) -> pd.DataFrame:
+    ed = _editors().get(sha)
+    if ed is None or not ed.base.equals(table):
+        # First look, or the table under it changed (rows dropped, QA re-run
+        # undid a drop, a re-extraction landed): start from the table as is.
+        ed = _editors()[sha] = _Editor(sha, table, table, gen=ed.gen + 1 if ed else 0)
+    elif ed.key not in st.session_state and ed.draft is not None:
+        ed.seed, ed.gen = ed.draft, ed.gen + 1
+    edited = st.data_editor(ed.seed, num_rows="dynamic", width="stretch", key=ed.key)
+    ed.draft = edited if ed.changed() else None
+    return edited
+
+
+# Per-paper inputs of the review form (tracking fields, note, override, the
+# licence form), by key prefix; each key ends in the paper's sha.
+_PAPER_INPUTS = ("lic_id_", "lic_ev_", "lic_url_", "cit_", "year_", "figs_", "issues_", "desc_",
+                 "note_", "override_")
+
+
+def _keep_inputs(pending: dict[str, StagedPaper], selected: str) -> None:
+    """Keep what was typed for the papers not on screen: re-assigning a value
+    through Session State stops Streamlit from dropping it with the widget."""
+    for k in list(st.session_state.keys()):
+        if isinstance(k, str) and k.startswith(_PAPER_INPUTS):
+            sha = k.rsplit("_", 1)[1]
+            if sha != selected and sha in pending:
+                st.session_state[k] = st.session_state[k]
+
+
+def _select(order: list[str]) -> str:
+    """The paper under review. It stays selected across reruns; a click on the
+    list picks another; once it leaves the queue (approved, rejected) the one
+    after it in the list takes its place, else the one before."""
+    ss = st.session_state
+    last_order = ss.get("review_order", [])
+    sha = ss.get("review_sha")
+    rows = ((ss.get("review_list") or {}).get("selection") or {}).get("rows") or []
+    if rows and rows[0] != ss.get("review_row") and rows[0] < len(last_order):
+        sha = last_order[rows[0]]     # clicked in the list
+    if sha not in order:
+        if sha in last_order:
+            i = last_order.index(sha)
+            sha = next((s for s in last_order[i + 1:] + last_order[:i][::-1] if s in order), order[0])
+        else:
+            sha = order[0]
+    ss["review_sha"], ss["review_order"], ss["review_row"] = sha, order, order.index(sha)
+    ss["review_list"] = {"selection": {"rows": [order.index(sha)], "columns": []}}
+    return sha
+
+
+def _step(by: int) -> None:
+    order = st.session_state["review_order"]
+    st.session_state["review_sha"] = order[order.index(st.session_state["review_sha"]) + by]
+
+
+def render_review_list(pending: dict[str, StagedPaper], licences: dict[str, License | None],
+                       sha: str) -> None:
+    """Every staged paper, one row each; the selected row is the paper below."""
+    def licence(lic: License | None) -> str:
+        return "none" if lic is None else lic.id if lic.is_open else f"{lic.id} (not open)"
+
+    editors = _editors()
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "Paper": s.paper.filename,
+                "Rows": len(s.result.df),
+                "Red": len(s.result.qa_report.reds),
+                "Amber": len(s.result.qa_report.ambers),
+                "Review": _tier_for(s).label,
+                "Licence": licence(licences[k]),
+                "Cost (USD)": result_usd(s.result),
+                "Edited": "yes" if (k in editors and editors[k].changed())
+                          or st.session_state.get(f"dropped_{k}") else "",
+            }
+            for k, s in pending.items()
+        ]),
+        key="review_list", on_select="rerun", selection_mode="single-row-required",
+        hide_index=True, width="stretch",
+        column_config={"Cost (USD)": st.column_config.NumberColumn(format="%.2f")},
+    )
+    order = list(pending)
+    i = order.index(sha)
+    col_prev, col_next, col_where = st.columns([1, 1, 6])
+    col_prev.button("Previous", key="review_prev", on_click=_step, args=(-1,), disabled=i == 0)
+    col_next.button("Next", key="review_next", on_click=_step, args=(1,), disabled=i == len(order) - 1)
+    col_where.write(f"**{i + 1} of {len(order)}:** {pending[sha].paper.filename}")
+
+
 def render_review_queue() -> None:
     pending = _pending()
     if not pending:
@@ -393,21 +595,22 @@ def render_review_queue() -> None:
 
     st.divider()
     st.subheader(f"Review queue ({len(pending)} pending)")
-    sha = st.selectbox(
-        "Paper to review",
-        list(pending),
-        format_func=lambda s: (
-            f"{_tier_for(pending[s]).icon} {pending[s].paper.filename} "
-            f"({len(pending[s].result.df)} rows · {_tier_for(pending[s]).label})"
-        ),
-    )
+    licences = {s: _license_for(p.paper) for s, p in pending.items()}
+    sha = _select(list(pending))
+    _keep_inputs(pending, sha)
+    for gone in set(_editors()) - set(pending):
+        del _editors()[gone]
+    render_review_list(pending, licences, sha)
     staged = pending[sha]
     paper, result = staged.paper, staged.result
+    lic = licences[sha]
+    mergeable = lic is not None and lic.is_open
 
     tier = _tier_for(staged)
     {"Fast track": st.success, "Standard": st.info, "Full review": st.error}[tier.label](
         f"{tier.icon} **{tier.label}** — {tier.reason}"
     )
+    render_license(sha, paper, lic)
     render_qa(result.qa_report)
     st.caption(_format_usage(result))
 
@@ -416,20 +619,20 @@ def render_review_queue() -> None:
     # level flags never name rows, so they can't be dropped this way; that is
     # deliberate. The drop lives in this session only and is recorded on
     # approval as an edit, with the rows in the review note. It resets the
-    # editor (new key), so drop first, then edit cells.
+    # editor (_table_editor), so drop first, then edit cells.
     drop_key = f"dropped_{sha}"
     dropped: list[int] = st.session_state.get(drop_key, [])
     droppable = [r for r in result.qa_report.flagged_rows if r not in dropped]
     col_drop, col_qa = st.columns(2)
     if droppable and col_drop.button(
-        f"🧹 Drop the {len(droppable)} QA-flagged row(s)", key=f"drop_{sha}",
+        f"Drop the {len(droppable)} QA-flagged row(s)", key=f"drop_{sha}",
         help="Rows named by the off-curve and duplicate checks: " + ", ".join(map(str, droppable)),
     ):
         st.session_state[drop_key] = sorted(dropped + droppable)
         st.rerun()
     # QA is pure and cheap; a paper staged before a check existed can pick up
     # today's checks without another extraction. Replaces the staged report.
-    if col_qa.button("♻️ Re-run QA checks", key=f"requa_{sha}",
+    if col_qa.button("Re-run QA checks", key=f"requa_{sha}",
                      help="Re-apply the current validation checks to this staged table (no API call)."):
         staging.stage(paper, staged.figure_is_curve, runner.rerun_qa(result, figure_is_curve=staged.figure_is_curve))
         st.session_state.pop(drop_key, None)
@@ -439,7 +642,13 @@ def render_review_queue() -> None:
     table = result.df.drop(index=[r - 1 for r in dropped if r - 1 in result.df.index])
 
     st.write(f"**{len(table)} rows.** Edit cells below if needed.")
-    edited = st.data_editor(table, num_rows="dynamic", width="stretch", key=f"editor_{sha}_{len(dropped)}")
+    edited = _table_editor(sha, table)
+    # What approval checks: the table as it stands (edits, dropped rows, and
+    # today's checks), which can differ from the staged report above.
+    qa = _edited_qa(staged, schema.coerce_schema(edited))
+    if qa.to_json() != result.qa_report.to_json():
+        st.caption("QA of the table below with today's checks — approval goes by this:")
+        render_qa(qa)
 
     if result.text_endpoints:
         with st.expander(f"Captured text endpoints ({len(result.text_endpoints)})"):
@@ -453,25 +662,22 @@ def render_review_queue() -> None:
     tracking = render_tracking_inputs(sha, paper.doi)
     note = st.text_input("Review note (optional)", key=f"note_{sha}")
     override = False
-    if not result.qa_report.passed:
+    if not qa.passed:
         override = st.checkbox(
             "Override red QA flags and merge anyway (records the override in the audit log)",
             key=f"override_{sha}",
         )
 
     col_a, col_b, col_c = st.columns(3)
-    if col_a.button("✅ Approve & merge", type="primary", key=f"approve_{sha}"):
+    if col_a.button("Approve & merge", type="primary", key=f"approve_{sha}", disabled=not mergeable):
         if not auth.require_write_access():
-            st.stop()
-        if not result.qa_report.passed and not override:
-            st.error("Red QA flags present — tick the override box to merge anyway.")
             st.stop()
         if dropped:
             note = f"dropped {len(dropped)} QA-flagged row(s): {', '.join(map(str, dropped))}" + (f"; {note}" if note else "")
         _approve(sha, staged, edited, tracking, note, override)
         st.rerun()
 
-    if col_b.button("🗑️ Reject", key=f"reject_{sha}"):
+    if col_b.button("Reject", key=f"reject_{sha}"):
         staging.discard(sha)
         st.info(f"{paper.filename} rejected and discarded (nothing written to the master DB).")
         st.rerun()
@@ -483,11 +689,11 @@ def render_review_queue() -> None:
     # paper takes the Batch API route here exactly as on first extraction
     # (runner.must_use_batch); its result lands when the job is collected, so
     # a second click meanwhile is refused rather than paid for twice.
-    batch_pending = any(sha in job.items for job in staging.load_batch_jobs().values())
+    batch_pending = sha in staging.in_flight_shas()
     if batch_pending:
-        col_c.caption("A batched re-extraction of this paper is in flight — see 'Batch API jobs'.")
+        col_c.caption("This paper is already in a batch job or being extracted — see 'Batch API jobs'.")
     if result.qa_report.flags and col_c.button(
-        "🔁 Re-extract with QA feedback", key=f"reextract_{sha}", disabled=batch_pending
+        "Re-extract with QA feedback", key=f"reextract_{sha}", disabled=batch_pending
     ):
         if not auth.require_write_access():
             st.stop()
@@ -498,16 +704,20 @@ def render_review_queue() -> None:
             st.stop()  # keep the submission message on screen; the job shows on the next run
         with st.spinner("Re-extracting with the QA findings as feedback — this runs one full synchronous extraction..."):
             try:
-                new_result = runner.extract_paper(
-                    Path(paper.pdf_path).read_bytes(),
-                    figure_is_curve=staged.figure_is_curve,
-                    qa_feedback=feedback,
-                )
+                with staging.claim(sha):   # a double click can't pay for it twice
+                    new_result = runner.extract_paper(
+                        Path(paper.pdf_path).read_bytes(),
+                        figure_is_curve=staged.figure_is_curve,
+                        qa_feedback=feedback,
+                    )
+                    staging.stage(paper, staged.figure_is_curve, new_result)   # before the spinner closes — see _run_batch
+            except staging.Busy as e:
+                st.error(str(e))
+                st.stop()
             except Exception as e:
                 staging.record_failed_run(paper, e)
                 st.error(f"Re-extraction failed (previous staged result kept): {e}")
                 st.stop()
-            staging.stage(paper, staged.figure_is_curve, new_result)  # before the spinner closes — see _run_batch
         st.rerun()
 
 
@@ -516,13 +726,15 @@ def render_review_queue() -> None:
 # --------------------------------------------------------------------------- #
 def main() -> None:
     st.title("REE Extraction Dashboard")
-    st.caption("Batch PDF upload → 26-column tables → QA → review → merge")
+    st.caption(
+        f"Batch jobs and uploads → {len(schema.COLUMNS)}-column tables → QA → review → merge. "
+        "Bulk runs over the open-access manifest: `python -m extraction.bulk`."
+    )
 
     uploaded_files = st.file_uploader(
         "Upload one or more research-paper PDFs", type=["pdf"], accept_multiple_files=True
     )
     if not uploaded_files:
-        st.info("Upload one or more PDFs to begin.")
         render_batch_jobs()
         render_review_queue()
         render_failed_runs()
@@ -543,6 +755,7 @@ def main() -> None:
                 "DOI": p.paper.doi or "—",
                 "Pages": p.paper.meta["n_pages"],
                 "Raster?": "yes" if p.paper.meta["is_raster_figure"] else "no/unknown",
+                "Licence": getattr(_license_for(p.paper), "id", None) or "none recorded",
                 "Status": p.status,
             }
             for p in previews
@@ -552,7 +765,7 @@ def main() -> None:
         table,
         width="stretch",
         hide_index=True,
-        disabled=["File", "DOI", "Pages", "Raster?", "Status"],
+        disabled=["File", "DOI", "Pages", "Raster?", "Licence", "Status"],
         key="batch_table",
     )
 
@@ -580,7 +793,7 @@ def main() -> None:
     # same extraction twice: skip anything already in an unfinished batch job
     # or already staged for review. Both live on disk, so this holds across
     # sessions and restarts.
-    in_flight = {sha for job in staging.load_batch_jobs().values() for sha in job.items}
+    in_flight = staging.in_flight_shas()
     awaiting_review = set(staging.load_all())
     busy = [p for p in selected if p.paper.sha in in_flight | awaiting_review]
     if busy:

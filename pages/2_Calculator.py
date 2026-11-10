@@ -56,9 +56,8 @@ with col2:
     )
     volume_ratio = st.number_input(
         "Phase volume ratio (org:aq)", min_value=0.1, value=1.0, step=0.1,
-        help="The extraction schema doesn't record phase ratio, so prior data "
-             "can't be filtered by it — predictions assume the papers' own "
-             "(usually 1:1) ratio.",
+        help="Predictions don't filter prior data by phase ratio — they assume "
+             "the papers' own (usually 1:1) ratio.",
     )
 
 st.divider()
@@ -157,7 +156,7 @@ if st.button("Solve", type="primary"):
         st.subheader(f"Predicted Extract% — {element} with {extractant} at pH {target_pH:g}")
         if volume_ratio != 1.0:
             st.warning(
-                f"Phase ratio {volume_ratio:g}:1 requested, but the schema doesn't record "
+                f"Phase ratio {volume_ratio:g}:1 requested, but predictions don't filter by "
                 "phase ratio — prior data generally assumes ~1:1, so treat the prediction "
                 "as approximate at other ratios."
             )
