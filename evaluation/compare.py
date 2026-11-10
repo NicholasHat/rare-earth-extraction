@@ -49,7 +49,7 @@ def _qa(result: sources.Result) -> dict:
 
 
 _SIDE_COLUMNS = [match.EL, "Extractant", match.CONC, "pH", "Extract%", "RRE composition (ppm)",
-                 "Acid Solution conc. (M)", "Leaching time (minute)"]
+                 "Acid Solution conc. (M)", "Leaching time (minute)", "Contact time (minute)"]
 
 
 def _with_figures(r: sources.Result) -> pd.DataFrame:
@@ -90,7 +90,7 @@ def side_by_side(claude: sources.Result, local: sources.Result) -> pd.DataFrame:
 
 
 def write_workbook(path: Path, claude: sources.Result, local: sources.Result) -> None:
-    """<paper>.xlsx: Side by side, then each pipeline's full 26-column table."""
+    """<paper>.xlsx: Side by side, then each pipeline's full table (every schema column)."""
     sheets = {}
     if claude.df is not None and local.df is not None:
         sheets["Side by side"] = side_by_side(claude, local)

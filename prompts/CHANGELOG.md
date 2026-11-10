@@ -4,7 +4,91 @@ Every extraction run records the exact `prompt_version` and `prompt_sha256` it
 used (`prompt_runs` table), so the dataset stays reproducible across versions.
 Old versions are never edited or deleted.
 
-## extraction_v14 — the errors the 2026-10-07 ten-paper audit found; no PDF library named (current pinned default)
+## extraction_v16 — the 2026-11 ten-paper audit of v15: values in the right column, every varied axis kept, nothing skipped (current pinned default)
+Measured against the PDFs, v15's digitised numbers were accurate (typically
+< 0.5 %E), but values landed in wrong columns, varied axes were lost and data
+was skipped. Each finding became a short rule folded into the step it belongs
+to (no new section):
+- **Stripping / scrubbing** (Step 1): back-extraction percentages go in
+  `Recovery %` with `Extract%` blank; `Treatment` is `Stripping` or
+  `Scrubbing` as the paper names it. v15's Step 1 mapped "% recovery" to
+  `Extract%` — one paper put 70 stripping rows there; a scrubbing table was
+  labelled Stripping. A stripping D is stored as reported (v15's
+  `%stripping = 100/(1+D)` aside is gone).
+- **A varied axis is never blank** (Step 8): every sweep row carries its x;
+  vol% of a neat extractant converts with stated densities and molar masses
+  (D2EHPA ≈ 30.1, TBP ≈ 36.5, PC88A ≈ 31.0, Cyanex 272 ≈ 31.7 mM per vol%);
+  an x no schema column holds (wt% of a mixture, a formulation ratio) means
+  no rows and a reason in `figures` — 12 rows of a Cyanex 923 wt% sweep had
+  identical conditions and different %E. v15's "Acid Solution conc. blank
+  when acidity is varied" now says when pH is varied.
+- **Element groups are not elements** (Step 1): no LREE/MREE/HREE/TREE rows
+  (106 on one paper), but a single-element bar in a grouped chart is
+  digitised (another paper skipped six charts with a Y bar each), and a
+  shared legend series gives one row per named element.
+- **Column definitions** (Step 8): `Acid Solution` is the aqueous medium the
+  row's percentage refers to; `Co-extractant` is organic-phase only (aqueous
+  complexants go in `Material Process`); a self-extracting ionic liquid is the
+  `Extractant`; `Phase ratio (O/A)` is of the row's own contact;
+  `Figure/Table` is where the numbers were taken from; a separation factor
+  needs its pair and direction in `Material Process` ("SF Dy/Nd").
+- **Derived %E only where it means %E** (Step 7): D → %E for a single batch
+  contact only; successive contacts, counter-current circuits and
+  mixer-settlers keep the reported quantity (a 4th-successive-contact D had
+  become "Y 99.5 %E").
+- **Scope** (Step 0): emulsion/supported liquid membranes, pertraction and
+  other transport experiments get no rows (owner decision); batch kinetics
+  stay in scope.
+- **Completeness** (Steps 0, 5; `figures`): every numbered figure and table,
+  and every numeric REE sentence, yields rows or a reason; every marker of a
+  kinetics plot is a row (v15 took 6 of 14 time points on 71 of 75 series);
+  hidden markers are digitised from their visible edge or listed as omitted;
+  a drawn (0, 0) origin marker is not a row.
+- **pH type inheritance** (Step 8), **overlaid PDFs** (Step 2: digitise only
+  what the rendered page shows — a hidden "FOR PEER REVIEW" draft layer
+  doubles the geometry), and **`text_endpoints.x_basis`** is the exact schema
+  column name, `x_value` null when the sentence states no x (v15 invented ~10
+  bases and once copied the D value into `x_value`).
+QA changed alongside (validation/checks.py; one curve definition,
+validation/curves.py, shared with the Analysis page) and the curve pre-pass
+no longer trusts overlaid pages. Output shape is unchanged from v15. (Not yet
+validated live — no `prompt_runs` record exists for this version.)
+
+## extraction_v15 — nine columns after the lab's 26, so a row keeps its conditions; each row names its own figure
+The 2026-10 ten-paper trial (v13, four papers re-run on v14) showed rows
+losing information the lab's 26 columns have nowhere to put. The 26 stay
+exactly as they are — names and order mirror the lab's spreadsheet — and nine
+are appended after `Recovery %` (validation/schema.py `ADDED_COLUMNS`):
+- `Diluent` — one trial paper is entirely about diluent effects.
+- `Co-extractant`, `Co-extractant Conc. (mM)` — Banda 2012b's varied synergist
+  concentration was folded into the extractant's name ("Cyanex 272 + TBP
+  (0.5 M)"), inconsistent with papers whose varied concentration is numeric.
+- `Phase ratio (O/A)` — v14 needs it to convert D to %E but stored it nowhere.
+  For a solid sorbent it is m/V in g/mL, so `%E = 100·D/(D + A/O)` holds for
+  both systems (Step 7 now writes R as A/O = 1/(O/A)).
+- `Contact time (minute)` — v14 put a kinetics plot's shaking time in
+  `Leaching time (minute)` (XAD-7 paper: 15–180 min), which is now reserved
+  for a leaching step that dissolves a solid feed.
+- `Distribution ratio (D)` — D as reported (log D → D), next to the %E derived
+  from it; only the derived %E survived before. QA now recomputes %E from D
+  and the phase ratio on every row that has all three.
+- `Total REE feed (mM)` — Afonin 2024 varies the total feed of a mixed-REE
+  solution (0.05–0.99 M), and v14's rule against copying totals onto each
+  element left those rows without their x.
+- `pH type` — `equilibrium` or `initial`; mixing them corrupts any curve comparison.
+- `Figure/Table` — the row's source. Replaces v13–v14's parallel
+  `row_figures` list, which was off by a few entries on the three longest
+  tables of the trial (345, 265 and 84 rows), losing every row's provenance.
+  A curve is now (paper, Figure/Table, element, series), which is also what
+  stops QA pooling two figures of the same element.
+- `text_endpoints` entries may name their `extractant`, which QA uses to pick
+  the curve a statement is about.
+`parse_output` still reads v7–v14 output (26 columns; the added ones load
+null, and an aligned `row_figures` fills `Figure/Table`). Everything else is
+unchanged from v14. (Not yet validated live — no `prompt_runs` record exists
+for this version.)
+
+## extraction_v14 — the errors the 2026-10-07 ten-paper audit found; no PDF library named
 Checked against the PDFs' own vector geometry, v13's rows were exact on the
 clean papers, but:
 - **Phase ratio.** A resin paper's log D (mL/g) was converted with

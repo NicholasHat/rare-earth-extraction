@@ -32,6 +32,12 @@ misspelling that tool's name (seen live: `bash_code_execction`). Rather than
 lose the whole extraction to a typo, it is answered with an is_error
 tool_result naming the mistake and the model carries on.
 
+Every completed turn can be handed to a chain store (extraction/transcripts.py)
+as it arrives: collection saves a batch's results to disk before working on
+them, and a continuation saves each turn before sending the next, so a
+continuation that dies resumes from its last completed turn instead of
+re-paying the whole chain.
+
 Only `end_turn` counts as a finished response. Every other `stop_reason` is a
 hard failure (surfaced as a specific RuntimeError, not a bare parse error) —
 see `_check_stop_reason`.
@@ -46,7 +52,9 @@ worse, not better. Don't re-add it without a plan for the cache invalidation.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable
 
 import anthropic
 
@@ -89,6 +97,9 @@ class ExtractResponse:
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+    # The part of the usage above billed by turns after the first — for a
+    # batch item, the synchronous continuation, which pays full price.
+    continuation_usage: dict = field(default_factory=dict)
 
     def usage(self) -> dict[str, int]:
         return {f: getattr(self, f) for f in _USAGE_FIELDS}
@@ -107,8 +118,36 @@ class ExtractionFailed(RuntimeError):
         self.cause = cause
         self.usage = usage
         self.turns_completed = turns_completed
+        self.transcript: str | None = None   # set by the runner: where the paid turns are saved
         turns = f" over {turns_completed} completed API turn(s)" if turns_completed is not None else ""
         super().__init__(f"{cause} [billed before failure: {_describe_usage(usage)}{turns}]")
+
+    @property
+    def credit_exhausted(self) -> bool:
+        return is_credit_exhausted(self.cause)
+
+
+class CreditExhausted(RuntimeError):
+    """The Anthropic account ran out of credit. Nothing half-done is lost:
+    whatever completed is saved, and the same command resumes once topped up."""
+
+
+def is_credit_exhausted(error: BaseException | None) -> bool:
+    """Whether `error` (or anything it wraps) is the API refusing for lack of
+    credit — a 402 billing_error, or the 400 'credit balance is too low' the
+    API has also returned for it."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, CreditExhausted):
+            return True
+        if isinstance(error, anthropic.APIStatusError) and (
+            error.status_code == 402 or error.type == "billing_error"
+            or "credit balance" in str(error).lower()
+        ):
+            return True
+        error = getattr(error, "cause", None) or error.__cause__
+    return False
 
 
 _STOP_REASON_ERRORS = {
@@ -269,7 +308,7 @@ def _response_from_chain(messages: list) -> ExtractResponse:
     text = "\n".join(
         block.text for block in messages[-1].content if block.type == "text"
     ).strip()
-    return ExtractResponse(text=text, **_sum_usage(messages))
+    return ExtractResponse(text=text, **_sum_usage(messages), continuation_usage=_sum_usage(messages[1:]))
 
 
 def _failed(cause: Exception, chain: list) -> ExtractionFailed:
@@ -365,7 +404,10 @@ def _container_id(chain: list) -> str | None:
     return None
 
 
-def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list) -> list:
+def _continue_until_done(
+    client: anthropic.Anthropic, kwargs: dict, chain: list,
+    on_turn: Callable[[list], None] | None = None,
+) -> list:
     """Continue a message chain whose last entry is resumable (see _resumable),
     re-sending the transcript so far — the documented continuation pattern for
     the server-side tool loop's iteration cap, plus an error tool_result for a
@@ -378,16 +420,24 @@ def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list)
     replayed transcript would refer to renders, scripts and the unzipped
     toolkit that no longer exist. An idle container is checkpointed and stays
     restorable by id for 30 days, so this also holds for a batch item resumed
-    hours after its batch ended."""
+    hours after its batch ended.
+
+    `on_turn(chain)` runs after each completed turn (never with a dying
+    stream's partial message on the end) — the caller's checkpoint. A chain
+    reloaded from such a checkpoint resumes here with the turns still
+    missing; the continuation budget counts the chain's existing turns, so a
+    resumed run gets the same total as one that never died."""
     user_content = kwargs["messages"][0]["content"]
 
-    for _ in range(_MAX_CONTINUATIONS):
+    while len(chain) <= _MAX_CONTINUATIONS:
         if not _resumable(chain[-1]):
             return chain
         turn = {**kwargs, "messages": _transcript(user_content, chain)}
         if container_id := _container_id(chain):
             turn["container"] = container_id
         _stream_turn(client, turn, chain)
+        if on_turn is not None:
+            on_turn(chain)
 
     if chain[-1].stop_reason == "pause_turn":
         raise RuntimeError(
@@ -398,12 +448,17 @@ def _continue_until_done(client: anthropic.Anthropic, kwargs: dict, chain: list)
     return chain
 
 
-def _run_with_continuations(client: anthropic.Anthropic, kwargs: dict, chain: list) -> list:
+def _run_with_continuations(
+    client: anthropic.Anthropic, kwargs: dict, chain: list,
+    on_turn: Callable[[list], None] | None = None,
+) -> list:
     """Run one extraction call, automatically resuming through pause_turn.
     Appends every message to `chain` (usually just one) as it arrives, so the
     caller still holds what was billed if a later turn raises."""
     _stream_turn(client, kwargs, chain)
-    return _continue_until_done(client, kwargs, chain)
+    if on_turn is not None:
+        on_turn(chain)
+    return _continue_until_done(client, kwargs, chain, on_turn)
 
 
 def extract(
@@ -413,6 +468,7 @@ def extract(
     model: str | None = None,
     analysis_block: str | None = None,
     qa_feedback: str | None = None,
+    on_turn: Callable[[list], None] | None = None,
 ) -> ExtractResponse:
     """Run one synchronous extraction. Returns the model's text output plus its
     token usage. Raises ExtractionFailed, carrying the usage billed so far, for
@@ -421,26 +477,39 @@ def extract(
     `analysis_block` is the optional deterministic curve pre-pass text
     (extraction/curve_prepass.py) injected into the user turn as a count anchor.
     `qa_feedback` is the optional previous-attempt QA failure block for an
-    on-demand re-extraction (runner.qa_feedback_block).
+    on-demand re-extraction (runner.qa_feedback_block). `on_turn(chain)` is
+    called after every completed turn (the transcript checkpoint).
     """
     model = model or config.EXTRACTION_MODEL
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
-    uploaded = client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf"))
-    toolkit = _upload_toolkit(client)
-    kwargs = _message_kwargs(
-        prompt_text, uploaded.id, model=model,
-        analysis_block=analysis_block, qa_feedback=qa_feedback, toolkit_file_id=toolkit.id,
-    )
+    uploads: list[str] = []
     chain: list = []
     try:
-        _run_with_continuations(client, kwargs, chain)
+        uploads.append(client.beta.files.upload(file=("paper.pdf", pdf_bytes, "application/pdf")).id)
+        uploads.append(_upload_toolkit(client).id)
+        kwargs = _message_kwargs(
+            prompt_text, uploads[0], model=model,
+            analysis_block=analysis_block, qa_feedback=qa_feedback, toolkit_file_id=uploads[1],
+        )
+        _run_with_continuations(client, kwargs, chain, on_turn)
         return _response_from_chain(chain)
     except Exception as e:
         raise _failed(e, chain) from e
     finally:
-        client.beta.files.delete(uploaded.id)
-        client.beta.files.delete(toolkit.id)
+        _delete_files(client, uploads)
+
+
+def _delete_files(client: anthropic.Anthropic, file_ids) -> None:
+    """Best-effort delete of Files API uploads (an already-deleted or expired
+    file is not an error worth surfacing)."""
+    for file_id in file_ids:
+        if not file_id:
+            continue
+        try:
+            client.beta.files.delete(file_id)
+        except Exception:
+            pass
 
 
 def _upload_toolkit(client: anthropic.Anthropic):
@@ -486,28 +555,126 @@ class BatchSubmission:
     batch_id: str
     file_ids: dict[str, str]   # custom_id -> uploaded Files API id (cleanup after collection)
     toolkit_file_id: str       # the one toolkit upload every request in the job shares
+    created_at: str | None = None   # the API's creation time (results expire 29 days later)
 
 
-def submit_batch(requests: list[BatchRequest], pdfs: dict[str, bytes]) -> BatchSubmission:
+class BatchNotCreated(RuntimeError):
+    """The API definitely did not create the batch (it refused the request).
+    Nothing was billed, and the uploads made for it were deleted."""
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(f"the batch was not created: {cause}")
+
+
+class BatchSubmissionUnknown(RuntimeError):
+    """The create request failed in a way that leaves it unknown whether the
+    API created the batch (connection dropped, timeout, server error). The
+    uploads are kept: if the batch exists it needs them. Reconcile against the
+    API's batch list (batch_jobs.reconcile) to find out."""
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(
+            f"unknown whether the batch was created ({cause}) — run a status check to reconcile"
+        )
+
+
+def submit_batch(
+    requests: list[BatchRequest],
+    pdfs: dict[str, bytes],
+    *,
+    on_upload: Callable[[str | None, str], None] | None = None,
+    before_create: Callable[[], None] | None = None,
+) -> BatchSubmission:
     """Upload each paper's PDF (`pdfs` is keyed by custom_id) and submit one
-    Batches API job covering every request."""
-    client = anthropic.Anthropic()
+    Batches API job covering every request.
 
-    toolkit = _upload_toolkit(client)
+    `on_upload(custom_id, file_id)` runs after each upload (custom_id None for
+    the toolkit) and `before_create()` just before the paid step, so the
+    caller can journal both: a crash at any point leaves a record of what was
+    uploaded and whether a batch may exist.
+
+    The create call is sent once (no SDK retry: a retried create whose first
+    attempt reached the API would submit, and bill, the batch twice). If the
+    API refuses it (4xx — e.g. no credit) the uploads are deleted and
+    BatchNotCreated is raised; any other failure raises BatchSubmissionUnknown
+    and keeps the uploads. A failed upload deletes the earlier uploads."""
+    client = anthropic.Anthropic()
+    on_upload = on_upload or (lambda custom_id, file_id: None)
+
+    uploaded: list[str] = []
     file_ids: dict[str, str] = {}
     params = []
-    for req in requests:
-        uploaded = client.beta.files.upload(
-            file=("paper.pdf", pdfs[req.custom_id], "application/pdf")
-        )
-        file_ids[req.custom_id] = uploaded.id
-        params.append({
-            "custom_id": req.custom_id,
-            "params": req.message_kwargs(uploaded.id, toolkit.id),
-        })
+    try:
+        toolkit = _upload_toolkit(client)
+        uploaded.append(toolkit.id)
+        on_upload(None, toolkit.id)
+        for req in requests:
+            pdf = client.beta.files.upload(file=("paper.pdf", pdfs[req.custom_id], "application/pdf"))
+            uploaded.append(pdf.id)
+            file_ids[req.custom_id] = pdf.id
+            on_upload(req.custom_id, pdf.id)
+            params.append({"custom_id": req.custom_id, "params": req.message_kwargs(pdf.id, toolkit.id)})
+        if before_create is not None:
+            before_create()
+    except Exception:
+        _delete_files(client, uploaded)
+        raise
 
-    batch = client.beta.messages.batches.create(betas=_BETAS, requests=params)
-    return BatchSubmission(batch_id=batch.id, file_ids=file_ids, toolkit_file_id=toolkit.id)
+    try:
+        batch = client.with_options(max_retries=0).beta.messages.batches.create(betas=_BETAS, requests=params)
+    except anthropic.APIStatusError as e:
+        if 400 <= e.status_code < 500:
+            _delete_files(client, uploaded)
+            raise BatchNotCreated(e) from e
+        raise BatchSubmissionUnknown(e) from e
+    except Exception as e:
+        raise BatchSubmissionUnknown(e) from e
+    created = getattr(batch, "created_at", None)
+    return BatchSubmission(
+        batch_id=batch.id, file_ids=file_ids, toolkit_file_id=toolkit.id,
+        created_at=created.isoformat() if isinstance(created, datetime) else None,
+    )
+
+
+@dataclass(frozen=True)
+class BatchInfo:
+    """What the API says about one batch (a free metadata call)."""
+    batch_id: str
+    processing_status: str           # 'in_progress' | 'canceling' | 'ended'
+    created_at: datetime
+    ended_at: datetime | None
+    requests: int                    # total requests in the batch
+    succeeded: int
+    errored: int
+    canceled: int
+    expired: int
+
+    @classmethod
+    def from_api(cls, batch) -> "BatchInfo":
+        c = batch.request_counts
+        return cls(
+            batch_id=batch.id, processing_status=batch.processing_status,
+            created_at=batch.created_at, ended_at=batch.ended_at,
+            requests=c.processing + c.succeeded + c.errored + c.canceled + c.expired,
+            succeeded=c.succeeded, errored=c.errored, canceled=c.canceled, expired=c.expired,
+        )
+
+
+def batch_info(batch_id: str) -> BatchInfo:
+    client = anthropic.Anthropic()
+    return BatchInfo.from_api(client.beta.messages.batches.retrieve(batch_id))
+
+
+def list_batches(created_after: datetime) -> list[BatchInfo]:
+    """Every batch on the account created after `created_after`. Walks every
+    page rather than stopping at the first older batch: reconciliation must
+    never miss a batch because of how the endpoint happens to order them —
+    missing one would get a live batch's uploads cleaned up."""
+    client = anthropic.Anthropic()
+    return [BatchInfo.from_api(b) for b in client.beta.messages.batches.list(limit=100)
+            if b.created_at >= created_after]
 
 
 def poll_batch_status(batch_id: str) -> str:
@@ -516,11 +683,36 @@ def poll_batch_status(batch_id: str) -> str:
     return client.beta.messages.batches.retrieve(batch_id).processing_status
 
 
+class _MemoryStore:
+    """A chain store that keeps nothing beyond this call (the default)."""
+
+    def __init__(self):
+        self._data: dict = {}
+
+    def load(self, custom_id):
+        return self._data.get(custom_id)
+
+    def save(self, custom_id, chain):
+        self._data[custom_id] = list(chain)
+
+    def save_error(self, custom_id, error):
+        self._data[custom_id] = error
+
+
+def _item_error(result) -> str:
+    """Why a batch item did not succeed, as specifically as the API says."""
+    kind = result.result.type
+    detail = getattr(getattr(getattr(result.result, "error", None), "error", None), "message", None)
+    return f"batch item {result.custom_id!r} did not succeed: {kind}" + (f" ({detail})" if detail else "")
+
+
 def collect_batch_results(
     batch_id: str,
     requests: list[BatchRequest],
     file_ids: dict[str, str],
     toolkit_file_id: str | None = None,
+    *,
+    store=None,
 ) -> dict[str, ExtractResponse | Exception]:
     """Fetch results once the batch has ended. Keyed by custom_id.
 
@@ -530,9 +722,18 @@ def collect_batch_results(
     used to rebuild the request for a paused item (below), which must match
     the one the batch ran; an item that finished cleanly never touches them.
 
+    `store` (extraction/transcripts.TranscriptStore) is where each item's
+    chain of turns lives: every result not yet in it is downloaded and saved
+    first — so a batch is fetched from the API once, and its output survives
+    the API's 29-day retention — and a continuation saves each turn as it
+    completes and resumes from the saved chain. Without a store nothing
+    outlives the call.
+
     A result that errored/canceled/expired — or that raises while being read or
     continued — is surfaced as an Exception value rather than raised, so one bad
-    paper doesn't lose the rest of the batch.
+    paper doesn't lose the rest of the batch. Once the credit balance runs out
+    no further continuation is attempted in this call; those items fail with
+    CreditExhausted and resume from their saved turns next time.
 
     A paused item (stop_reason=pause_turn, or a misspelled tool call — see
     _resumable) is NOT treated as a terminal failure: it has used a full
@@ -544,41 +745,59 @@ def collect_batch_results(
     of the batch stays batch-discounted.
     """
     client = anthropic.Anthropic()
+    store = store if store is not None else _MemoryStore()
     by_id = {req.custom_id: req for req in requests}
+
+    missing = {cid for cid in by_id if store.load(cid) is None}
+    if missing:
+        for result in client.beta.messages.batches.results(batch_id):
+            if result.custom_id not in missing:
+                continue
+            if result.result.type != "succeeded":
+                store.save_error(result.custom_id, _item_error(result))
+            else:
+                store.save(result.custom_id, [result.result.message])
+
     out: dict[str, ExtractResponse | Exception] = {}
-    for result in client.beta.messages.batches.results(batch_id):
-        if result.result.type != "succeeded":
-            out[result.custom_id] = RuntimeError(
-                f"batch item {result.custom_id!r} did not succeed: {result.result.type}"
-            )
+    credit_error: Exception | None = None
+    for custom_id, req in by_id.items():
+        saved = store.load(custom_id)
+        if saved is None:
+            out[custom_id] = RuntimeError("no result returned for this paper")
             continue
-        message = result.result.message
+        if isinstance(saved, str):
+            out[custom_id] = RuntimeError(saved)
+            continue
+        chain = list(saved)
         try:
-            chain = [message]
-            if _resumable(message):
-                req = by_id[result.custom_id]
-                kwargs = req.message_kwargs(file_ids[result.custom_id], toolkit_file_id)
-                chain = _continue_until_done(client, kwargs, chain)
-            out[result.custom_id] = _response_from_chain(chain)
+            if _resumable(chain[-1]):
+                if credit_error is not None:
+                    raise CreditExhausted(
+                        "the Anthropic credit balance ran out earlier in this collection, so this "
+                        "paper's continuation was not attempted — top up and collect again; it "
+                        f"resumes from its {len(chain)} saved turn(s)"
+                    )
+                kwargs = req.message_kwargs(file_ids[custom_id], toolkit_file_id)
+                chain = _continue_until_done(
+                    client, kwargs, chain, on_turn=lambda c, cid=custom_id: store.save(cid, c)
+                )
+            out[custom_id] = _response_from_chain(chain)
         except Exception as e:
             # Deliberately broad. The continuation above makes live API calls,
             # so this catches anthropic.RateLimitError / APIStatusError /
             # APIConnectionError as well as our own RuntimeErrors — none of
             # which are RuntimeError subclasses. Letting one escape would
-            # discard every result already collected in `out`, and the retry
-            # re-runs (and re-bills) the synchronous continuations that had
-            # already succeeded. The error is not swallowed: it is returned as
-            # this paper's value (with the usage billed so far, batch turn
-            # included) and surfaced in the review queue.
-            out[result.custom_id] = _failed(e, chain)
+            # discard every result already collected in `out`. The error is
+            # not swallowed: it is returned as this paper's value (with the
+            # usage billed so far, batch turn included) and surfaced in the
+            # review queue; the turns that completed are in `store`.
+            out[custom_id] = _failed(e, chain)
+            if is_credit_exhausted(e):
+                credit_error = e
     return out
 
 
 def cleanup_batch_files(file_ids: dict[str, str], toolkit_file_id: str | None = None) -> None:
     """Delete the Files API uploads made for a batch, once results are collected."""
     client = anthropic.Anthropic()
-    for file_id in [*file_ids.values(), *([toolkit_file_id] if toolkit_file_id else [])]:
-        try:
-            client.beta.files.delete(file_id)
-        except Exception:
-            pass
+    _delete_files(client, [*file_ids.values(), toolkit_file_id])

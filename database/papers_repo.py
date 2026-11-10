@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from ingestion.licensing import License
+
 
 def canonical_doi(doi: str | None) -> str | None:
     """Canonical DB form of a DOI (dedup key): stripped, lowercased, '' -> None.
@@ -94,3 +96,22 @@ def insert(
         ),
     )
     return int(cur.lastrowid)
+
+
+def get_license(row: sqlite3.Row | None) -> License | None:
+    """The licence recorded on a papers row, if any."""
+    if row is None or "license" not in row.keys() or not row["license"]:
+        return None
+    return License(row["license"], row["license_evidence"], row["license_url"],
+                   row["license_origin"] or "manual")
+
+
+def set_license(conn: sqlite3.Connection, paper_id: int, license: License) -> None:
+    """Record a paper's licence provenance — the hand-set path for a paper
+    already in the DB (e.g. Swain & Otu 2011, merged before licences were
+    recorded). The caller commits; it changes no extraction rows."""
+    conn.execute(
+        "UPDATE papers SET license = ?, license_evidence = ?, license_url = ?, license_origin = ? "
+        "WHERE paper_id = ?",
+        (license.id, license.evidence, license.url, license.origin, paper_id),
+    )

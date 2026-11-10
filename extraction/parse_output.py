@@ -4,12 +4,15 @@ The OUTPUT CONTRACT asks for a single JSON object with `rows` and
 `text_endpoints`. Two `rows` shapes are supported:
   - extraction_v5.1–v6: a list of objects, one per row, keyed by column name.
   - extraction_v7+: a compact positional form — a top-level `columns` list of
-    the 26 column names plus `rows` as a list of same-length value arrays —
-    to avoid paying output tokens for 26 verbose keys on every single row.
-extraction_v13+ adds two optional keys beside `text_endpoints`: `row_figures`
-(the figure each row was digitised from, in row order) and `figures` (every
-figure, whether it was digitised, and why not). A `row_figures` list that
-doesn't line up with `rows` is dropped rather than trusted.
+    the column names plus `rows` as a list of same-length value arrays — to
+    avoid paying output tokens for verbose keys on every single row.
+`columns` holds every column of validation/schema.py (extraction_v15+) or the
+lab's 26 only (v7–v14); a missing added column loads as null.
+extraction_v13+ adds `figures` (every figure, whether it was digitised, and
+why not). v13–v14 also gave each row's source as a parallel `row_figures`
+list; it is folded into the row's `Figure/Table` column when it lines up with
+`rows` and dropped otherwise (on the 2026-10 trial it was off by a few entries
+on the three longest tables — v15 puts the source inside each row instead).
 This parser is deliberately tolerant: it pulls the JSON out of a ```json
 fenced block when present, else falls back to the outermost {...} span, so a
 stray sentence around the block doesn't break the run.
@@ -29,13 +32,11 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 @dataclass
 class ParsedExtraction:
-    df: pd.DataFrame                 # coerced to the 26-column schema
+    df: pd.DataFrame                 # coerced to the schema (validation/schema.py)
     text_endpoints: list[dict]
     coercion_failures: int           # numeric cells that were non-null but unparseable
     raw_text: str
-    row_figures: list[str] = field(default_factory=list)   # extraction_v13+: source figure per row
     figures: list[dict] = field(default_factory=list)      # extraction_v13+: every figure, used or why not
-    row_figures_misaligned: bool = False                     # present but not one per row -> dropped
 
 
 class ParseError(ValueError):
@@ -88,8 +89,9 @@ def _expand_positional_rows(columns: object, rows: list) -> list[dict]:
     """
     if not isinstance(columns, list):
         raise ParseError("array-shaped 'rows' requires a top-level 'columns' list")
-    if set(columns) != set(schema.COLUMNS):
-        missing = sorted(set(schema.COLUMNS) - set(columns))
+    # Every lab column must be there; the added ones are absent before v15.
+    if not set(schema.LAB_COLUMNS) <= set(columns) <= set(schema.COLUMNS) or len(set(columns)) != len(columns):
+        missing = sorted(set(schema.LAB_COLUMNS) - set(columns))
         unexpected = sorted(set(columns) - set(schema.COLUMNS))
         detail = "; ".join(
             part for part in (
@@ -97,7 +99,7 @@ def _expand_positional_rows(columns: object, rows: list) -> list[dict]:
                 f"unexpected: {unexpected}" if unexpected else "",
             ) if part
         )
-        raise ParseError(f"'columns' does not match the 26-column schema ({detail})")
+        raise ParseError(f"'columns' does not match the extraction schema ({detail or 'duplicate names'})")
 
     expanded = []
     for row in rows:
@@ -125,9 +127,7 @@ def parse(raw_text: str) -> ParsedExtraction:
     raw_df = pd.DataFrame(raw_rows) if raw_rows else pd.DataFrame(columns=schema.COLUMNS)
     df = schema.coerce_schema(raw_df)
 
-    row_figures = obj.get("row_figures")
-    misaligned = row_figures is not None and (
-        not isinstance(row_figures, list) or len(row_figures) != len(raw_rows))
+    df = fill_figures(df, obj.get("row_figures"))
     figures = obj.get("figures")
 
     return ParsedExtraction(
@@ -135,7 +135,19 @@ def parse(raw_text: str) -> ParsedExtraction:
         text_endpoints=[ep for ep in endpoints if isinstance(ep, dict)],
         coercion_failures=coercion_failures,
         raw_text=raw_text,
-        row_figures=[] if misaligned or row_figures is None else [str(f) for f in row_figures],
         figures=[f for f in figures if isinstance(f, dict)] if isinstance(figures, list) else [],
-        row_figures_misaligned=misaligned,
     )
+
+
+def fill_figures(df: pd.DataFrame, row_figures) -> pd.DataFrame:
+    """Fold an extraction_v13–v14 `row_figures` list into the `Figure/Table`
+    column, where a row doesn't already say. Only a list with exactly one
+    entry per row is trusted — one that doesn't line up would shift every
+    row's source after the first gap. Returns `df` (filled in place)."""
+    if not isinstance(row_figures, list) or len(row_figures) != len(df) or not len(df):
+        return df
+    given = pd.Series([str(f).strip() if f is not None else None for f in row_figures], index=df.index)
+    given = given.where(given.astype("string").str.len() > 0, None)
+    col = schema.FIGURE_COLUMN
+    df[col] = df[col].where(df[col].notna(), given).astype("object")
+    return df

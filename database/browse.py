@@ -18,7 +18,7 @@ def list_papers(conn: sqlite3.Connection) -> pd.DataFrame:
         """
         SELECT
             p.paper_id, p.doi, p.title, p.original_filename, p.is_raster_figure,
-            p.uploaded_at,
+            p.uploaded_at, p.license, p.license_origin,
             (SELECT COUNT(*) FROM prompt_runs pr
              WHERE pr.paper_id = p.paper_id AND pr.status = 'approved') AS approved_runs,
             (SELECT COUNT(*) FROM v_current_best vb WHERE vb.paper_id = p.paper_id) AS current_best_rows
@@ -77,7 +77,9 @@ def tracking_sheet(conn: sqlite3.Connection) -> pd.DataFrame:
             "Year": v["pub_year"],
             "DOI / link": v["doi"].map(naming.doi_link),
             "Output file": [
-                naming.export_filename(r.short_citation, r.paper_id, int(r.data_rows))
+                # A missing citation reads back as NaN beside a filled one.
+                naming.export_filename(r.short_citation if pd.notna(r.short_citation) else None,
+                                       r.paper_id, int(r.data_rows))
                 if pd.notna(r.data_rows)
                 else None
                 for r in v.itertuples()

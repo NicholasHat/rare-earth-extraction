@@ -28,7 +28,7 @@ def test_collect_batch_builds_request_items_with_reloaded_prompt_and_file_id():
 
     captured = {}
 
-    def _fake_collect_batch_results(batch_id, requests, file_ids, toolkit_file_id):
+    def _fake_collect_batch_results(batch_id, requests, file_ids, toolkit_file_id, store=None):
         captured["batch_id"] = batch_id
         captured["requests"] = requests
         captured["file_ids"] = file_ids
@@ -106,7 +106,7 @@ def test_submit_batch_threads_qa_feedback_into_item_and_request():
     persisted BatchItem so a paused item's continuation is rebuilt with it."""
     captured = {}
 
-    def _fake_submit(requests, pdfs):
+    def _fake_submit(requests, pdfs, **hooks):
         captured["requests"] = requests
         return SimpleNamespace(batch_id="batch_1", file_ids={"sha1": "file_1"}, toolkit_file_id="file_kit")
 

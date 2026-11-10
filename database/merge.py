@@ -3,6 +3,10 @@
 `commit_extraction` ties the per-table writes (papers, prompt_runs, extractions,
 text_endpoints, review_log) into one transaction so a partially-merged paper can
 never exist. It is the single write path used by the review UI on 'approve'.
+
+It is also the open-licence gate: a paper whose recorded licence is not open
+(config.OPEN_LICENSES) — or that has none — is refused before anything is
+written, and the first merge of each day leaves a backup of the DB first.
 """
 from __future__ import annotations
 
@@ -10,7 +14,14 @@ import sqlite3
 
 import pandas as pd
 
-from . import extractions_repo, papers_repo, review_repo
+import config
+from ingestion.licensing import License, is_open
+
+from . import connection, extractions_repo, papers_repo, review_repo
+
+
+class LicenseRequired(RuntimeError):
+    """The paper has no recorded open licence, so it may not be merged."""
 
 
 def commit_extraction(
@@ -39,6 +50,7 @@ def commit_extraction(
     output_tokens: int | None = None,
     cache_creation_input_tokens: int | None = None,
     cache_read_input_tokens: int | None = None,
+    license: License | None = None,
 ) -> dict:
     """Insert/locate the paper, record an approved run, and merge its rows.
 
@@ -49,13 +61,25 @@ def commit_extraction(
     summary dict with the paper_id, prompt_run_id, and the superseded
     prompt_run_id (None on a first approval).
 
+    `license` is the paper's licence (from the open-access manifest or set at
+    review); it is recorded on the paper. Without one, the licence already on
+    the paper's row is used. Either way it must be open, or LicenseRequired is
+    raised and nothing is written.
+
     The whole thing runs in one transaction; any error rolls everything back.
     """
+    existing = papers_repo.find_by_hash(conn, content_sha256) or papers_repo.find_by_doi(conn, doi)
+    effective = license or papers_repo.get_license(existing)
+    if effective is None or not is_open(effective):
+        what = f"licence '{effective.id}'" if effective is not None else "no recorded licence"
+        raise LicenseRequired(
+            f"Not merged: this paper has {what}, and only openly-licensed papers "
+            f"({', '.join(sorted(config.OPEN_LICENSES))}) may enter the database. Record its licence "
+            "(the open-access manifest, or set it by hand at review) — nothing was written."
+        )
+    connection.backup_once_a_day(conn)
     try:
         with conn:  # BEGIN ... COMMIT on success, ROLLBACK on exception
-            existing = papers_repo.find_by_hash(conn, content_sha256) or (
-                papers_repo.find_by_doi(conn, doi)
-            )
             if existing is not None:
                 paper_id = int(existing["paper_id"])
             else:
@@ -70,6 +94,8 @@ def commit_extraction(
                     figure_type=figure_type,
                     is_raster_figure=is_raster_figure,
                 )
+            if license is not None:
+                papers_repo.set_license(conn, paper_id, license)
             if tracking:
                 # Same call for new and reused papers: on a re-approval the
                 # reviewer's (non-empty) tracking edits update the paper row.
@@ -123,3 +149,4 @@ def commit_extraction(
         }
     except sqlite3.IntegrityError as e:
         raise RuntimeError(f"merge failed (constraint): {e}") from e
+

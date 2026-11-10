@@ -1,6 +1,8 @@
 """Tests for database.browse — the read-only queries behind the DB viewer page."""
 import pandas as pd
 
+from ingestion.licensing import License
+
 from database import browse, merge
 from validation import schema
 
@@ -16,6 +18,7 @@ def _sample_df(element="La", n=3):
 def _commit(conn, sha="hash1", doi="10.1/x", prompt_version="extraction_v5.1", note=None):
     return merge.commit_extraction(
         conn,
+        license=License("cc-by", origin="manifest"),
         content_sha256=sha,
         pdf_path=f"data/incoming/{sha}.pdf",
         df=_sample_df(),
@@ -57,6 +60,7 @@ def test_paper_summary_aggregates_elements_extractants_and_ph(conn):
     ]
     merge.commit_extraction(
         conn,
+        license=License("cc-by", origin="manifest"),
         content_sha256="hash1",
         pdf_path="data/incoming/hash1.pdf",
         df=schema.coerce_schema(pd.DataFrame(rows)),

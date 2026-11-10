@@ -6,6 +6,9 @@ data/incoming/
 data/staging/
 data/exports/
 data/comparisons/
+data/transcripts/
+data/backups/
+data/open_access/pdfs/
 data/*.db
 data/*.db-wal
 data/*.db-shm

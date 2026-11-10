@@ -25,7 +25,16 @@ CREATE TABLE IF NOT EXISTS papers (
     pub_year          TEXT,                 -- publication year, e.g. '2011'
     figures_used      TEXT,                 -- e.g. 'Fig. 2, Fig. 4'
     known_issues      TEXT,                 -- caveats spotted during review
-    short_description TEXT                  -- one-paragraph summary of the paper/extraction
+    short_description TEXT,                 -- one-paragraph summary of the paper/extraction
+
+    -- Licence provenance (added 2026-11; same _ensure_added_columns story).
+    -- Only a paper with an open licence (config.OPEN_LICENSES) may be merged —
+    -- database/merge.py enforces it. Looked up from data/open_access/manifest.csv
+    -- by content sha256 at ingest, or set by hand at review time.
+    license           TEXT,                 -- lower-case id: 'cc-by', 'cc-by-nc-nd', 'cc0', 'public-domain'
+    license_evidence  TEXT,                 -- where the licence was read (e.g. the article page's licence line)
+    license_url       TEXT,                 -- source URL of that evidence
+    license_origin    TEXT                  -- 'manifest' | 'manual'
     -- NOTE: no paper-level 'status'; review state lives per-version on prompt_runs.status.
 );
 
@@ -58,7 +67,11 @@ CREATE TABLE IF NOT EXISTS prompt_runs (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_approved_per_version
     ON prompt_runs(paper_id, prompt_version) WHERE status = 'approved';
 
--- extractions: THE 26-COLUMN SCHEMA, one row per digitized data point per element.
+-- extractions: THE 35-COLUMN SCHEMA (validation/schema.py), one row per digitized
+-- data point per element. The first 26 mirror the lab's spreadsheet; the 9 after
+-- "Recovery %" were added 2026-11 (extraction_v15) and reach pre-existing DBs via
+-- database.connection's _ensure_added_columns, which appends them after merged_at
+-- — so read columns by name, never by position.
 CREATE TABLE IF NOT EXISTS extractions (
     extraction_id   INTEGER PRIMARY KEY AUTOINCREMENT,
     paper_id        INTEGER NOT NULL REFERENCES papers(paper_id),
@@ -90,6 +103,15 @@ CREATE TABLE IF NOT EXISTS extractions (
     "Stripping Temperature (oC)"           REAL,
     "Leaching time (minute)"               REAL,
     "Recovery %"                           REAL,
+    "Diluent"                              TEXT,
+    "Co-extractant"                        TEXT,
+    "Co-extractant Conc. (mM)"             REAL,
+    "Phase ratio (O/A)"                    REAL,
+    "Contact time (minute)"                REAL,
+    "Distribution ratio (D)"               REAL,
+    "Total REE feed (mM)"                  REAL,
+    "pH type"                              TEXT,
+    "Figure/Table"                         TEXT,
 
     merged_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -101,7 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_extractions_extractant ON extractions("Extractant
 CREATE INDEX IF NOT EXISTS idx_extractions_ph         ON extractions("pH");
 
 -- text_endpoints: the paper's STATED numeric claims, captured by extraction_v5.1.
--- A QA anchor (README §9), deliberately NOT part of the 26-column extractions table.
+-- A QA anchor (README §9), deliberately NOT part of the extractions table.
 CREATE TABLE IF NOT EXISTS text_endpoints (
     endpoint_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     paper_id        INTEGER NOT NULL REFERENCES papers(paper_id),
@@ -208,6 +230,7 @@ SELECT p.paper_id,
        p.figures_used,
        p.known_issues,
        p.short_description,
+       p.license,
        CASE WHEN pu.paper_id IS NOT NULL THEN 'Extracted' ELSE 'Uploaded' END
            AS status,
        DATE(pr.reviewed_at) AS date_processed,

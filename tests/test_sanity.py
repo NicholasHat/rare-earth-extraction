@@ -1,6 +1,8 @@
 """Tests for calculator.sanity.typical_ranges — reads v_current_best only."""
 import pandas as pd
 
+from ingestion.licensing import License
+
 from calculator.sanity import typical_ranges
 from database import merge
 from validation import schema
@@ -23,6 +25,7 @@ def _sample_df(extractant="Cyanex 272", element="La", n=5):
 def _commit(conn, sha="hash1", doi="10.1/x", extractant="Cyanex 272", element="La"):
     return merge.commit_extraction(
         conn,
+        license=License("cc-by", origin="manifest"),
         content_sha256=sha,
         pdf_path=f"data/incoming/{sha}.pdf",
         df=_sample_df(extractant, element),

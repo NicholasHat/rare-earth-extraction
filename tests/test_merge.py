@@ -1,6 +1,8 @@
 """database.merge: an approved extraction round-trips into v_current_best."""
 import pandas as pd
 
+from ingestion.licensing import License
+
 from database import extractions_repo, merge
 from validation import schema
 
@@ -16,6 +18,7 @@ def _sample_df():
 def _commit(conn, sha="hash1", doi="10.1/x", **kw):
     return merge.commit_extraction(
         conn,
+        license=License("cc-by", origin="manifest"),
         content_sha256=sha,
         pdf_path=f"data/incoming/{sha}.pdf",
         df=_sample_df(),

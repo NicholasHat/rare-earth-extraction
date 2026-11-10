@@ -31,11 +31,21 @@ which is the main token-cost driver on dense multi-figure papers. Monochrome
 (plan §5.2's "second paper" case) the way the filled/colour path has, so its
 coordinates aren't trusted as ground truth yet. Only filled-marker coordinates
 are injected, same set the authoritative gate below already trusts.
+
+Overlaid PDFs. Some PDFs carry an earlier draft of a page as a hidden layer
+under the final one (MDPI's "FOR PEER REVIEW" drafts): the geometry then holds
+every marker twice and an axis's tick labels at two positions, so counts come
+out doubled and calibrated coordinates are garbage, while the rendered page
+looks clean (2026-11 trial, sha 0346dd7e…: pages 9–10 "authoritative" at
+22/21 and 14/14 markers per series against 6 and 6 visible). A figure page
+whose text carries the draft marker, or whose calibrated axis reads two or
+more tick values twice, is never authoritative and forwards no counts or
+coordinates — only a note to digitise what the rendered page shows.
 """
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 import pdfplumber
@@ -68,6 +78,10 @@ _PANEL_MIN_SUSPECTS = 2     # one odd group can be noise; a merge inflates sever
 # badge, not a figure (logos seen: <= 72 pt; the smallest data figure seen,
 # Quinn et al. 2015 Fig. 4, is 172 x 137 pt).
 _MIN_FIGURE_PT = 100.0
+# Text a hidden earlier-draft layer leaves on the page (MDPI's draft header,
+# "Minerals 2025, 15, x FOR PEER REVIEW"). Case-sensitive: Elsevier footers
+# say "Peer review under responsibility of ...".
+_DRAFT_MARKER = "FOR PEER REVIEW"
 
 
 @dataclass
@@ -102,6 +116,7 @@ class CurvePrepass:
     confident_pages: list[FigurePage] = field(default_factory=list)
     unverified_pages: list[FigurePage] = field(default_factory=list)
     raster_figures: list[RasterFigure] = field(default_factory=list)
+    overlaid_pages: list[int] = field(default_factory=list)   # vector figure pages with a hidden draft layer
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -113,7 +128,7 @@ class CurvePrepass:
         return sorted(out, reverse=True)
 
     def to_prompt_block(self) -> str:
-        if not (self.confident_pages or self.unverified_pages or self.raster_figures):
+        if not (self.confident_pages or self.unverified_pages or self.raster_figures or self.overlaid_pages):
             return ""
         lines = ["## DETERMINISTIC CURVE ANALYSIS (computed from the PDF's own vector geometry)"]
         for fp in self.confident_pages:
@@ -148,6 +163,12 @@ class CurvePrepass:
                 f"vector series detected with varied counts {fp.series_counts} — likely a "
                 f"multi-panel figure the deterministic pass can't cleanly separate. Digitise "
                 f"it fully yourself; treat these counts only as a floor."
+            )
+        for idx in self.overlaid_pages:
+            lines.append(
+                f"- **Page {idx} (overlaid draft layer):** the PDF holds a hidden earlier draft under "
+                f"this page's figure, so its drawing commands double the markers and tick labels — "
+                f"nothing was counted. Digitise only what the rendered page shows."
             )
         per_page: dict[int, int] = defaultdict(int)
         for rf in self.raster_figures:
@@ -206,6 +227,15 @@ def _looks_panel_merged(markers: list[MarkerRecord]) -> bool:
     return suspect >= _PANEL_MIN_SUSPECTS and suspect * 2 >= qualifying
 
 
+def _doubled_ticks(res) -> bool:
+    """An axis whose labels read several tick values each at two positions — a
+    hidden draft layer's labels under the final ones. Several, not one: a
+    stray number in the label band (a table cell, an axis-title condition)
+    repeats a single value."""
+    return any(cal is not None and sum(n > 1 for n in Counter(cal.tick_values).values()) >= 2
+               for cal in (res.x_calibration, res.y_calibration))
+
+
 def _round(x: float) -> float:
     """4 significant figures — plenty for experimental data, keeps the
     injected coordinate block compact."""
@@ -242,6 +272,7 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
             ]
             for i, page in enumerate(pdf.pages)
         ]
+        drafts = {i for i, page in enumerate(pdf.pages) if _DRAFT_MARKER in (page.extract_text() or "")}
 
     for idx in range(len(page_figures)):
         try:
@@ -265,6 +296,9 @@ def analyze(pdf_bytes: bytes) -> CurvePrepass:
             counts = sorted(per_group.values(), reverse=True)
             if len(counts) < _MIN_SERIES or sum(counts) < _MIN_MARKERS:
                 continue  # not a data figure (logo / stray graphic)
+            if idx in drafts or _doubled_ticks(res):
+                result.overlaid_pages.append(idx)
+                continue
             # Two gates: uniform counts AND no colour group spatially split
             # across panels — a two-panel figure inflates every series by the
             # same factor, so uniformity alone passes it (Swain & Otu Fig. 6).

@@ -101,7 +101,7 @@ def test_positional_rows_with_misspelled_column_raises():
     columns = list(parse_output.schema.COLUMNS)
     columns[columns.index("pH")] = "PH"  # plausible model typo
     row = _positional_row({"pH": 1.5})
-    with pytest.raises(parse_output.ParseError, match="does not match the 26-column schema"):
+    with pytest.raises(parse_output.ParseError, match="does not match the extraction schema"):
         parse_output.parse(json.dumps({"columns": columns, "rows": [row], "text_endpoints": []}))
 
 
@@ -112,7 +112,7 @@ def test_positional_rows_with_wrong_row_length_raises():
 
     raw = json.dumps({
         "columns": parse_output.schema.COLUMNS,
-        "rows": [["Yb", 1.5]],  # 2 values against a 26-column header
+        "rows": [["Yb", 1.5]],  # 2 values against a 35-column header
         "text_endpoints": [],
     })
     with pytest.raises(parse_output.ParseError, match="row length"):
@@ -120,29 +120,51 @@ def test_positional_rows_with_wrong_row_length_raises():
 
 
 def _v13(rows, row_figures, figures):
+    """extraction_v13–v14 output: the lab's 26 columns, plus a parallel row_figures list."""
     from validation import schema
-    return "```json\n" + json.dumps({"columns": schema.COLUMNS, "rows": rows, "text_endpoints": [],
+    lab = [[r[schema.COLUMNS.index(c)] for c in schema.LAB_COLUMNS] for r in rows]
+    return "```json\n" + json.dumps({"columns": schema.LAB_COLUMNS, "rows": lab, "text_endpoints": [],
                                      "row_figures": row_figures, "figures": figures}) + "\n```"
 
 
-def test_v13_provenance_is_parsed():
+def test_v13_provenance_is_folded_into_the_figure_column():
     rows = [_positional_row({"pH": 1.0}), _positional_row({"pH": 2.0})]
     figures = [{"figure": "Fig. 2", "digitised": True, "reason": ""},
                {"figure": "Fig. 6", "digitised": False, "reason": "NMR spectrum"}]
-    parsed = parse_output.parse(_v13(rows, ["Fig. 2", "Fig. 2"], figures))
-    assert parsed.row_figures == ["Fig. 2", "Fig. 2"] and parsed.figures == figures
-    assert not parsed.row_figures_misaligned
+    parsed = parse_output.parse(_v13(rows, ["Fig. 2", "Fig. 3"], figures))
+    assert list(parsed.df["Figure/Table"]) == ["Fig. 2", "Fig. 3"] and parsed.figures == figures
+    assert list(parsed.df.columns) == parse_output.schema.COLUMNS     # added columns present, null
+    assert parsed.df["Contact time (minute)"].isna().all()
 
 
 def test_row_figures_that_do_not_line_up_with_rows_are_dropped():
     rows = [_positional_row({"pH": 1.0}), _positional_row({"pH": 2.0})]
     parsed = parse_output.parse(_v13(rows, ["Fig. 2"], []))
-    assert parsed.row_figures == [] and parsed.row_figures_misaligned
+    assert parsed.df["Figure/Table"].isna().all()
 
 
 def test_pre_v13_output_has_no_provenance():
     parsed = parse_output.parse("```json\n" + json.dumps({"rows": [], "text_endpoints": []}) + "\n```")
-    assert parsed.row_figures == [] and parsed.figures == [] and not parsed.row_figures_misaligned
+    assert parsed.df.empty and parsed.figures == []
+
+
+def test_v15_output_carries_its_source_and_conditions_in_the_row():
+    rows = [_positional_row({"pH": 1.0, "Figure/Table": "Table 3", "Co-extractant": "TBP",
+                             "Co-extractant Conc. (mM)": 500, "pH type": "equilibrium"})]
+    parsed = parse_output.parse("```json\n" + json.dumps(
+        {"columns": parse_output.schema.COLUMNS, "rows": rows, "text_endpoints": [], "figures": []}) + "\n```")
+    row = parsed.df.iloc[0]
+    assert row["Figure/Table"] == "Table 3" and row["Co-extractant"] == "TBP"
+    assert row["Co-extractant Conc. (mM)"] == 500 and row["pH type"] == "equilibrium"
+
+
+def test_columns_must_include_every_lab_column_and_nothing_unknown():
+    import pytest
+    from validation import schema
+    for columns in (schema.LAB_COLUMNS[:-1], schema.COLUMNS + ["Confidence"], schema.LAB_COLUMNS + ["pH"]):
+        rows = [[None] * len(columns)]
+        with pytest.raises(parse_output.ParseError):
+            parse_output.parse(json.dumps({"columns": columns, "rows": rows, "text_endpoints": []}))
 
 
 def test_provenance_summary_counts_rows_per_figure_and_keeps_skip_reasons():

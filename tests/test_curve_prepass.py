@@ -1,4 +1,5 @@
 """Tests for the deterministic curve pre-pass and its pipeline wiring."""
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -102,6 +103,11 @@ def test_unverified_pages_never_get_coordinates_even_if_present():
     assert "DIGITIZED CURVE DATA" not in p.to_prompt_block()
 
 
+def _page(images=(), text=""):
+    """A pdfplumber page as analyze() reads it."""
+    return SimpleNamespace(images=list(images), extract_text=lambda: text)
+
+
 def _image(x0, top, x1, bottom, px):
     return {"x0": x0, "top": top, "x1": x1, "bottom": bottom,
             "width": x1 - x0, "height": bottom - top, "srcsize": px}
@@ -110,7 +116,7 @@ def _image(x0, top, x1, bottom, px):
 def test_analyze_lists_every_figure_image_on_a_raster_page_and_skips_logos():
     # Quinn et al. 2015 page 2: two figures, one above the other; the journal
     # logo on page 0 of the same PDF is ~54 x 72 pt.
-    page = SimpleNamespace(images=[
+    page = _page([
         _image(122.6, 53.2, 464.0, 284.5, (949, 644)),
         _image(122.6, 350.5, 464.0, 726.1, (949, 1044)),
         _image(499.0, 56.7, 553.0, 128.2, (150, 199)),
@@ -148,7 +154,7 @@ def test_analyze_withholds_coordinates_when_an_axis_calibration_is_untrusted():
     fake = _fake_result(markers, _OK_CAL, _BAD_CAL, counts)
     with patch("extraction.curve_prepass.extract_curves", return_value=fake):
         with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [SimpleNamespace(images=[])]
+            mock_open.return_value.__enter__.return_value.pages = [_page()]
             p = analyze(b"fake pdf bytes")
     assert len(p.confident_pages) == 1
     assert p.confident_pages[0].markers is None
@@ -165,7 +171,7 @@ def test_analyze_carries_coordinates_when_both_axes_trusted():
     fake = _fake_result(markers, _OK_CAL, _OK_CAL, counts)
     with patch("extraction.curve_prepass.extract_curves", return_value=fake):
         with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [SimpleNamespace(images=[])]
+            mock_open.return_value.__enter__.return_value.pages = [_page()]
             p = analyze(b"fake pdf bytes")
     assert p.confident_pages[0].markers is not None
     assert "DIGITIZED CURVE DATA" in p.to_prompt_block()
@@ -212,7 +218,7 @@ def test_analyze_downgrades_panel_merged_page():
     fake = _fake_result(markers, _OK_CAL, _OK_CAL, counts)
     with patch("extraction.curve_prepass.extract_curves", return_value=fake):
         with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [SimpleNamespace(images=[])]
+            mock_open.return_value.__enter__.return_value.pages = [_page()]
             p = analyze(b"fake pdf bytes")
     assert p.confident_pages == []
     assert len(p.unverified_pages) == 1
@@ -295,3 +301,39 @@ def test_prepass_on_swain_downgrades_two_panel_fig6_page():
     assert all(fp.page_index != 5 for fp in p.confident_pages)
     assert any(fp.page_index == 5 for fp in p.unverified_pages)
     assert 30 not in p.authoritative_counts
+
+
+# --- overlaid PDFs: a hidden earlier-draft layer under the page ------------- #
+
+def _uniform_page(x_cal=_OK_CAL, y_cal=_OK_CAL):
+    markers = [MarkerRecord("#ff0000" if i < 15 else "#00ff00", "filled",
+                            pixel_x=float(i % 15), pixel_y=float(i), data_x=float(i), data_y=float(i))
+               for i in range(30)]
+    return _fake_result(markers, x_cal, y_cal, {"#ff0000": 15, "#00ff00": 15})
+
+
+def _analyze_one(result, text=""):
+    with patch("extraction.curve_prepass.extract_curves", return_value=result):
+        with patch("pdfplumber.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.pages = [_page(text=text)]
+            return analyze(b"fake pdf bytes")
+
+
+def test_a_page_with_a_hidden_draft_layer_is_never_authoritative():
+    """0346dd7e (MDPI, 'FOR PEER REVIEW' draft under every page): pages 9-10
+    were authoritative at 22/21 and 14/14 markers per series against 6 visible."""
+    p = _analyze_one(_uniform_page(), text="Minerals 2025, 15, x FOR PEER REVIEW 10 of 17")
+    assert p.confident_pages == [] and p.unverified_pages == [] and p.authoritative_counts == []
+    assert p.overlaid_pages == [0]
+    block = p.to_prompt_block()
+    assert "overlaid draft layer" in block and "DIGITIZED CURVE DATA" not in block
+    # Elsevier's footer is not the draft marker.
+    assert _analyze_one(_uniform_page(), text="Peer review under responsibility of X").confident_pages
+
+
+def test_an_axis_reading_its_tick_labels_twice_is_an_overlaid_page():
+    doubled = dataclasses.replace(_OK_CAL, tick_values=[95, 95, 90, 85, 80, 75, 75])
+    assert _analyze_one(_uniform_page(y_cal=doubled)).overlaid_pages == [0]
+    # One stray repeated number in the label band (a table cell) is not a second layer.
+    stray = dataclasses.replace(_OK_CAL, tick_values=[2.0, 2.0, 0.0, 4.0])
+    assert _analyze_one(_uniform_page(y_cal=stray)).confident_pages

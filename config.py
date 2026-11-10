@@ -20,6 +20,30 @@ INCOMING_DIR = DATA_DIR / "incoming"   # persisted source PDFs, named <sha256>.p
 STAGING_DIR = DATA_DIR / "staging"     # per-paper extracted XLSX awaiting review
 EXPORTS_DIR = DATA_DIR / "exports"     # approved per-paper CSV exports (<citation>_<rows>.csv)
 DB_PATH = DATA_DIR / "master.db"       # the SQLite master database
+TRANSCRIPTS_DIR = DATA_DIR / "transcripts"  # every paid model turn, per run (extraction/transcripts.py)
+
+# The openly-licensed paper set curated by the open-access agent:
+# manifest.csv (one row per PDF, keyed by sha256) + pdfs/<sha256>.pdf.
+OPEN_ACCESS_DIR = DATA_DIR / "open_access"
+OPEN_ACCESS_MANIFEST = Path(
+    os.getenv("OPEN_ACCESS_MANIFEST", "") or OPEN_ACCESS_DIR / "manifest.csv"
+).expanduser()
+
+# Licences under which a paper's extracted data may enter the master DB
+# (database/merge.py refuses anything else). Lower-case ids as the manifest
+# writes them. Every Creative Commons variant counts as open here, including
+# NC and ND: the rows are facts read off the paper for non-commercial lab
+# research, not a redistributed adaptation of it. Narrow it with a
+# comma-separated OPEN_LICENSES in .env if the owner decides otherwise.
+_DEFAULT_OPEN_LICENSES = (
+    "cc0,public-domain,cc-by,cc-by-sa,cc-by-nc,cc-by-nc-sa,cc-by-nd,cc-by-nc-nd"
+)
+OPEN_LICENSES = frozenset(
+    x.strip().lower() for x in (os.getenv("OPEN_LICENSES", "") or _DEFAULT_OPEN_LICENSES).split(",") if x.strip()
+)
+
+# The Message Batches API keeps a batch's results for this long after creation.
+BATCH_RESULTS_RETENTION_DAYS = 29
 
 PROMPTS_DIR = ROOT / "prompts"
 
@@ -31,7 +55,7 @@ LOCAL_PIPELINE_RUNS_DIR = Path(_local_runs).expanduser() if _local_runs else Non
 # --- Settings (with sensible local-demo defaults) --------------------------
 REQUIRE_PASSWORD = os.getenv("REQUIRE_PASSWORD", "false").strip().lower() == "true"
 WRITE_PASSWORD = os.getenv("WRITE_PASSWORD", "")
-EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v14")
+EXTRACTION_PROMPT_VERSION = os.getenv("EXTRACTION_PROMPT_VERSION", "extraction_v16")
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-sonnet-5-5")
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
 
@@ -60,5 +84,5 @@ EXTRACTION_EFFORT = os.getenv("EXTRACTION_EFFORT", "").strip().lower()
 
 def ensure_dirs() -> None:
     """Create the runtime data directories if they don't exist."""
-    for d in (DATA_DIR, INCOMING_DIR, STAGING_DIR, EXPORTS_DIR):
+    for d in (DATA_DIR, INCOMING_DIR, STAGING_DIR, EXPORTS_DIR, TRANSCRIPTS_DIR):
         d.mkdir(parents=True, exist_ok=True)

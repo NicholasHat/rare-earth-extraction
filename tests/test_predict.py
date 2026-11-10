@@ -4,6 +4,8 @@ Reads v_current_best only (same seam as calculator.sanity); fixtures go through
 the real merge path so the view resolution is exercised, not mocked.
 """
 import pandas as pd
+
+from ingestion.licensing import License
 import pytest
 
 from calculator.predict import _evaluate_series, predict_extract_pct
@@ -29,6 +31,7 @@ def _sweep_df(element="La", conc=500.0, ppm=100.0, points=((1.0, 10.0), (2.0, 40
 def _commit(conn, df, sha="hash1", doi="10.1/x"):
     return merge.commit_extraction(
         conn,
+        license=License("cc-by", origin="manifest"),
         content_sha256=sha,
         pdf_path=f"data/incoming/{sha}.pdf",
         df=df,

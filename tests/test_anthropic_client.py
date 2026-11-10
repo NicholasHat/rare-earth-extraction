@@ -378,8 +378,10 @@ def test_submit_batch_uploads_the_toolkit_once_and_every_request_references_it()
     uploads = iter([SimpleNamespace(id="file_kit"), SimpleNamespace(id="file_a"), SimpleNamespace(id="file_b")])
     with patch("anthropic.Anthropic") as mock_anthropic:
         client = MagicMock()
+        client.with_options.return_value = client
         client.beta.files.upload.side_effect = lambda file: next(uploads)
         client.beta.messages.batches.create.return_value.id = "batch_1"
+        client.beta.messages.batches.create.return_value.created_at = None
         mock_anthropic.return_value = client
         sub = anthropic_client.submit_batch(
             [BatchRequest("a", "p", "claude-sonnet-5"), BatchRequest("b", "p", "claude-sonnet-5")],

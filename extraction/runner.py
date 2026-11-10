@@ -3,7 +3,9 @@
   load pinned prompt -> call Anthropic API -> parse output -> run QA checks
 
 Returns ExtractionResult(s) for the review UI. It does NOT touch the DB —
-merge happens only on human approval (database.merge.commit_extraction).
+merge happens only on human approval (database.merge.commit_extraction). The
+one thing it writes is each run's transcript (extraction/transcripts.py):
+every paid turn, saved as it completes.
 
 Two entry points, sharing the same pre-pass + parse + QA logic (_prepass,
 _postprocess):
@@ -15,15 +17,17 @@ _postprocess):
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
 import config
 from validation import checks
-from validation.report import QAReport, Severity
+from validation.report import QAReport
 
-from . import anthropic_client, curve_prepass, parse_output, prompt_loader
+from . import anthropic_client, curve_prepass, parse_output, prompt_loader, provenance
+from .transcripts import TranscriptStore
 
 
 @dataclass
@@ -42,9 +46,15 @@ class ExtractionResult:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0  # high value here confirms the cache breakpoint is working
-    row_figures: list[str] = field(default_factory=list)   # source figure per row, as extracted (v13+)
     figures: list[dict] = field(default_factory=list)      # every figure: digitised or why not (v13+)
     via_batch: bool = False           # billed at the Batches API's 50% rate (a paused item's synchronous continuation, if any, at full rate)
+    continuation_usage: dict = field(default_factory=dict)  # tokens of turns after the first (a batch item's full-price continuation)
+    transcript: str = ""              # where every paid turn of this run is saved, relative to data/
+
+    @property
+    def row_figures(self) -> list[str]:
+        """The source figure/table of each row — its `Figure/Table` column."""
+        return provenance.row_figures(self.df)
 
 
 def _prepass(pdf_bytes: bytes) -> tuple[str, list[int]]:
@@ -84,6 +94,7 @@ def _postprocess(
     prompt_sha256: str,
     model: str,
     via_batch: bool = False,
+    transcript: str = "",
 ) -> ExtractionResult:
     """Parse a model response and run QA — shared by the sync and batch paths."""
     parsed = parse_output.parse(response.text)
@@ -94,10 +105,6 @@ def _postprocess(
         coercion_failures=parsed.coercion_failures,
         deterministic_counts=deterministic_counts,
     )
-    if parsed.row_figures_misaligned:
-        report.add("provenance", Severity.AMBER,
-                   "The model's row_figures list doesn't have one entry per row, so which figure each "
-                   "row came from is unknown for this extraction.")
     return ExtractionResult(
         df=parsed.df,
         text_endpoints=parsed.text_endpoints,
@@ -113,9 +120,10 @@ def _postprocess(
         output_tokens=response.output_tokens,
         cache_creation_input_tokens=response.cache_creation_input_tokens,
         cache_read_input_tokens=response.cache_read_input_tokens,
-        row_figures=parsed.row_figures,
         figures=parsed.figures,
         via_batch=via_batch,
+        continuation_usage=dict(response.continuation_usage),
+        transcript=transcript,
     )
 
 
@@ -159,28 +167,40 @@ def extract_paper(
     model: str | None = None,
     qa_feedback: str | None = None,
 ) -> ExtractionResult:
-    """Run extraction + QA on one PDF's bytes (synchronous — blocks until done)."""
+    """Run extraction + QA on one PDF's bytes (synchronous — blocks until done).
+
+    Every completed turn is saved to a transcript (data/transcripts/sync_*/)
+    as it arrives; a failure's ExtractionFailed names it in `.transcript`."""
     bundle = prompt_loader.load_prompt(prompt_version)
     model = model or config.EXTRACTION_MODEL
     analysis_block, deterministic_counts = _prepass(pdf_bytes)
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    store = TranscriptStore.for_sync_run()
 
-    response = anthropic_client.extract(
-        bundle.text, pdf_bytes, model=model,
-        analysis_block=analysis_block or None, qa_feedback=qa_feedback,
-    )
     try:
-        return _postprocess(
-            response,
-            figure_is_curve=figure_is_curve,
-            deterministic_counts=deterministic_counts,
-            analysis_block=analysis_block,
-            prompt_version=bundle.version,
-            prompt_sha256=bundle.sha256,
-            model=model,
+        response = anthropic_client.extract(
+            bundle.text, pdf_bytes, model=model,
+            analysis_block=analysis_block or None, qa_feedback=qa_feedback,
+            on_turn=lambda chain: store.save(sha, chain),
         )
-    except Exception as e:
-        # The call succeeded and was billed; a parse/QA failure must still say so.
-        raise anthropic_client.ExtractionFailed(e, response.usage()) from e
+        try:
+            return _postprocess(
+                response,
+                figure_is_curve=figure_is_curve,
+                deterministic_counts=deterministic_counts,
+                analysis_block=analysis_block,
+                prompt_version=bundle.version,
+                prompt_sha256=bundle.sha256,
+                model=model,
+                transcript=store.relpath(sha) if store.path(sha).exists() else "",
+            )
+        except Exception as e:
+            # The call succeeded and was billed; a parse/QA failure must still say so.
+            raise anthropic_client.ExtractionFailed(e, response.usage()) from e
+    except anthropic_client.ExtractionFailed as e:
+        if store.path(sha).exists():
+            e.transcript = store.relpath(sha)
+        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +228,10 @@ def submit_batch(
     prompt_version: str | None = None,
     model: str | None = None,
     qa_feedback: str | None = None,
-) -> anthropic_client.BatchSubmission:
+    on_prepared=None,
+    on_upload=None,
+    before_create=None,
+) -> tuple[anthropic_client.BatchSubmission, dict[str, "BatchItem"]]:
     """Run the deterministic pre-pass for each paper and submit one Batches API
     job covering all of them.
 
@@ -222,6 +245,11 @@ def submit_batch(
     every paper in the job, so a re-extraction submits a one-paper job. It is
     kept on the BatchItem because a paused item is rebuilt from the item when
     its continuation is sent.
+
+    `on_prepared(items)`, `on_upload(custom_id, file_id)` and `before_create()`
+    are journaling hooks (extraction/batch_jobs.py records each step before
+    the next, so a crash never leaves an untracked paid batch or upload); see
+    anthropic_client.submit_batch for the failure modes.
     """
     bundle = prompt_loader.load_prompt(prompt_version)
     model = model or config.EXTRACTION_MODEL
@@ -243,8 +271,13 @@ def submit_batch(
         )
         requests.append(_batch_request(items[custom_id], bundle.text))
         pdfs[custom_id] = pdf_bytes
+    if on_prepared is not None:
+        on_prepared(items)
 
-    return anthropic_client.submit_batch(requests, pdfs), items
+    submission = anthropic_client.submit_batch(
+        requests, pdfs, on_upload=on_upload, before_create=before_create
+    )
+    return submission, items
 
 
 def _batch_request(item: BatchItem, prompt_text: str) -> anthropic_client.BatchRequest:
@@ -267,6 +300,8 @@ def collect_batch(
     items: dict[str, BatchItem],
     file_ids: dict[str, str],
     toolkit_file_id: str | None = None,
+    *,
+    store: TranscriptStore | None = None,
 ) -> dict[str, ExtractionResult | Exception]:
     """Once the batch has ended, parse + QA every succeeded result.
 
@@ -278,6 +313,11 @@ def collect_batch(
     requires re-sending the original request, so we reload each item's pinned
     prompt text by version (cheap — a local file read, not an API call) and
     reuse the already-uploaded `file_id` rather than re-uploading the PDF.
+
+    With a `store` (the batch's TranscriptStore) every result is saved to disk
+    before it is worked on and a continuation resumes from its saved turns —
+    see anthropic_client.collect_batch_results. A failure's ExtractionFailed
+    names the transcript in `.transcript`.
     """
     prompt_text_by_version: dict[str, str] = {}
     requests = []
@@ -289,15 +329,18 @@ def collect_batch(
         requests.append(_batch_request(item, prompt_text_by_version[item.prompt_version]))
 
     raw_results = anthropic_client.collect_batch_results(
-        batch_id, requests, file_ids, toolkit_file_id
+        batch_id, requests, file_ids, toolkit_file_id, store=store
     )
     out: dict[str, ExtractionResult | Exception] = {}
     for custom_id, item in items.items():
         raw = raw_results.get(custom_id)
+        transcript = store.relpath(custom_id) if store is not None and store.path(custom_id).exists() else ""
         if raw is None:
             out[custom_id] = RuntimeError("no result returned for this paper")
             continue
         if isinstance(raw, Exception):
+            if transcript:
+                raw.transcript = transcript
             out[custom_id] = raw
             continue
         try:
@@ -310,13 +353,16 @@ def collect_batch(
                 prompt_sha256=item.prompt_sha256,
                 model=item.model,
                 via_batch=True,
+                transcript=transcript,
             )
         except Exception as e:
             # Broad for the same reason as collect_batch_results: _postprocess
             # does parsing, schema coercion and QA, and anything it raises for
             # ONE paper must not discard the papers already parsed above (a
             # re-collect re-bills any synchronous continuations that succeeded).
-            out[custom_id] = anthropic_client.ExtractionFailed(e, raw.usage())
+            failed = anthropic_client.ExtractionFailed(e, raw.usage())
+            failed.transcript = transcript
+            out[custom_id] = failed
     return out
 
 

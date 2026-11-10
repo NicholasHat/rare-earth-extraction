@@ -1,4 +1,6 @@
-"""Row-level comparison of two extractions of the same paper.
+"""Row-level comparison of two extractions of the same paper (the lab's
+columns only: the columns added in extraction_v15 are empty on the local
+pipeline's side, so comparing them would only measure that).
 
 Rows are matched one-to-one within the same system (element + extractant,
 spelling-normalised): the closest pair by a scaled distance — pH within

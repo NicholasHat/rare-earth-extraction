@@ -7,7 +7,7 @@ import pandas as pd
 
 from validation.schema import COLUMNS
 
-# Pre-built column lists for the parametrised INSERT (26 schema cols + 2 FKs).
+# Pre-built column lists for the parametrised INSERT (every schema col + 2 FKs).
 _INSERT_COLS = ["paper_id", "prompt_run_id"] + COLUMNS
 _QUOTED = ", ".join(f'"{c}"' for c in _INSERT_COLS)
 _PLACEHOLDERS = ", ".join(["?"] * len(_INSERT_COLS))
@@ -17,7 +17,7 @@ _INSERT_SQL = f"INSERT INTO extractions ({_QUOTED}) VALUES ({_PLACEHOLDERS})"
 def insert_extractions(
     conn: sqlite3.Connection, paper_id: int, prompt_run_id: int, df: pd.DataFrame
 ) -> int:
-    """Insert the 26-column rows for one run. Returns the number of rows inserted."""
+    """Insert the schema-column rows for one run. Returns the number of rows inserted."""
     rows = []
     for _, r in df.iterrows():
         values = [paper_id, prompt_run_id]
@@ -63,8 +63,13 @@ def insert_text_endpoints(
 
 
 def current_best(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Return the current-best (latest approved version per paper) extractions."""
-    return pd.read_sql_query("SELECT * FROM v_current_best", conn)
+    """Return the current-best (latest approved version per paper) extractions,
+    in schema order. (A DB that gained the added columns by ALTER TABLE holds
+    them after merged_at; the order here doesn't depend on that.)"""
+    df = pd.read_sql_query("SELECT * FROM v_current_best", conn)
+    lead = [c for c in ("extraction_id", "paper_id", "prompt_run_id") if c in df.columns]
+    tail = [c for c in df.columns if c not in lead and c not in COLUMNS]
+    return df[lead + [c for c in COLUMNS if c in df.columns] + tail]
 
 
 def count_current_best(conn: sqlite3.Connection) -> int:

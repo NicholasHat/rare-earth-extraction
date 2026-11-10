@@ -12,6 +12,7 @@ ATOMIC_MASS_G_PER_MOL: dict[str, float] = {
     "Ce": 140.12,
     "Pr": 140.91,
     "Nd": 144.24,
+    "Pm": 144.91,   # no stable isotope; the longest-lived (145Pm). Tracer studies use 147Pm.
     "Sm": 150.36,
     "Eu": 151.96,
     "Gd": 157.25,
@@ -33,9 +34,9 @@ ATOMIC_MASS_G_PER_MOL: dict[str, float] = {
     "Li": 6.94,
 }
 
-# The 14 lanthanides plus Y/Sc — the REY set the extraction prompt targets.
+# The 15 lanthanides plus Y/Sc — the REY set the extraction prompt targets.
 REE_ELEMENTS: list[str] = [
-    "La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Tb",
+    "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb",
     "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Y", "Sc",
 ]
 

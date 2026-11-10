@@ -2,7 +2,6 @@
 job sidecars that let both survive a Streamlit server restart. Pure file I/O
 against a temporary STAGING_DIR; no Streamlit, no API."""
 import json
-from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -80,19 +79,19 @@ def test_restaging_the_same_paper_replaces_it(_staging_dir):
     loaded = staging.load_all()
     assert len(loaded) == 1
     assert loaded[_paper().sha].result.prompt_version == "extraction_v10"
-    assert len(list(_staging_dir.glob("*"))) == 2  # one .xlsx + one .meta.json
+    assert len(list(_staging_dir.glob("*.*"))) == 2  # one .xlsx + one .meta.json
 
 
 def test_discard_removes_both_files(_staging_dir):
     staging.stage(_paper(), True, _result())
     staging.discard(_paper().sha)
-    assert list(_staging_dir.iterdir()) == []
+    assert [p for p in _staging_dir.iterdir() if p.is_file()] == []
     assert staging.load_all() == {}
 
 
-def test_load_skips_orphaned_sidecar_and_corrupt_json(_staging_dir):
+def test_load_skips_orphaned_sidecar_and_corrupt_json_but_deletes_nothing(_staging_dir):
     staging.stage(_paper("b" * 64), True, _result())
-    # Sidecar without its table (e.g. a crash between the two writes).
+    # An old-style sidecar (no table inside) whose .xlsx is gone.
     (_staging_dir / ("c" * 64 + ".meta.json")).write_text("{}")
     # Table with an unparseable sidecar.
     (_staging_dir / ("d" * 64 + ".xlsx")).write_bytes(b"not really xlsx")
@@ -100,7 +99,53 @@ def test_load_skips_orphaned_sidecar_and_corrupt_json(_staging_dir):
 
     loaded = staging.load_all()
     assert list(loaded) == ["b" * 64]
-    assert not (_staging_dir / ("c" * 64 + ".meta.json")).exists()
+    assert (_staging_dir / ("c" * 64 + ".meta.json")).exists()   # left for inspection
+
+
+def test_the_sidecar_is_the_record_so_a_lost_or_stale_xlsx_loses_nothing(_staging_dir):
+    staged = staging.stage(_paper(), True, _result())
+    staging.table_path(_paper().sha).unlink()
+    got = staging.load_all()[_paper().sha]
+    pd.testing.assert_frame_equal(got.result.df, schema.coerce_schema(staged.result.df))
+
+
+def test_a_26_column_staged_result_loads_into_the_35_column_schema(_staging_dir):
+    """The 2026-10 trial's sidecars: table in an .xlsx with the lab's 26
+    columns, provenance as a parallel row_figures list in the sidecar."""
+    sha = "e" * 64
+    df = _result().df[schema.LAB_COLUMNS]
+    df.to_excel(_staging_dir / f"{sha}.xlsx", index=False, engine="openpyxl")
+    (_staging_dir / f"{sha}.meta.json").write_text(json.dumps({
+        "sha": sha, "pdf_path": "p.pdf", "doi": None, "filename": "old.pdf", "meta": {},
+        "prompt_version": "extraction_v14", "prompt_sha256": "x", "model": "m",
+        "raw_response": "{}", "coercion_failures": 0, "text_endpoints": [], "qa_report_json": "[]",
+        "row_figures": ["Fig. 2", "Fig. 3"], "figures": [],
+    }))
+    got = staging.load_all()[sha].result
+    assert list(got.df.columns) == schema.COLUMNS
+    assert got.row_figures == ["Fig. 2", "Fig. 3"]
+    assert got.df["Diluent"].isna().all()
+
+
+def test_a_re_extraction_keeps_the_result_it_replaces(_staging_dir):
+    staging.stage(_paper(), True, _result())
+    staging.stage(_paper(), True, _result())            # the same run re-staged (Re-run QA): nothing kept
+    assert not (_staging_dir / "_superseded").exists()
+    second = _result()
+    second.raw_response = '{"rows": []}'
+    staging.stage(_paper(), True, second)
+    kept = list((_staging_dir / "_superseded").glob("*.meta.json"))
+    assert len(kept) == 1 and json.loads(kept[0].read_text())["raw_response"] == "{}"
+    assert staging.load_all()[_paper().sha].result.raw_response == '{"rows": []}'
+
+
+def test_licence_round_trips_and_can_be_set_by_hand(_staging_dir):
+    from ingestion.licensing import License
+    staging.stage(_paper(), True, _result())
+    assert staging.load_all()[_paper().sha].paper.license is None
+    staging.set_license(_paper().sha, License.of("CC BY 4.0", "article page footer", "https://x"))
+    got = staging.load_all()[_paper().sha].paper.license
+    assert got == License("cc-by", "article page footer", "https://x", "manual")
 
 
 def test_load_tolerates_a_sidecar_written_before_new_fields_existed(_staging_dir):
@@ -175,13 +220,11 @@ def test_batch_job_delete_and_corrupt_sidecar(_staging_dir):
     assert staging.load_batch_jobs() == {}
 
 
-def test_record_failures_keeps_only_failed_papers_and_releases_lock(_staging_dir):
+def test_record_failures_keeps_only_failed_papers(_staging_dir):
     job = _job()
     ok_sha, bad_sha = "a" * 64, "f" * 64
     job.items[bad_sha] = BatchItem(**{**vars(job.items[ok_sha]), "custom_id": bad_sha})
     job.papers[bad_sha] = _paper(bad_sha)
-    job.begin_collection()
-    assert job.collection_in_progress()
 
     job.record_failures({bad_sha: "could not parse"})
 
@@ -190,17 +233,66 @@ def test_record_failures_keeps_only_failed_papers_and_releases_lock(_staging_dir
     assert list(got.papers) == [bad_sha]
     assert got.errors == {bad_sha: "could not parse"}
     assert got.file_ids == job.file_ids  # every upload is still cleaned up on discard
-    assert not got.collection_in_progress()
 
 
-def test_collection_lock_self_heals_after_staleness_window():
+def test_collection_lock_excludes_a_second_collector_and_dies_with_its_holder(_staging_dir):
+    """An OS lock: a second collector (another click, the CLI) is refused
+    while the first holds it, and it frees itself when the holder exits —
+    here in a child process killed mid-collection — with nothing to clean up."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
     job = _job()
+    job.save()
     assert not job.collection_in_progress()
-    job.collection_started_at = datetime.now(timezone.utc).isoformat()
+    with staging.collection_lock(job.batch_id):
+        assert job.collection_in_progress()
+        with pytest.raises(staging.Busy):
+            with staging.collection_lock(job.batch_id):
+                pass
+    assert not job.collection_in_progress()
+
+    root = Path(__file__).resolve().parents[1]
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time, config; from pathlib import Path; config.STAGING_DIR = Path(sys.argv[1]); "
+         "from extraction import staging\n"
+         "with staging.collection_lock('msgbatch_1'):\n    print('ready', flush=True); time.sleep(60)",
+         str(_staging_dir)],
+        cwd=root, stdout=subprocess.PIPE, text=True,
+    )
+    assert child.stdout.readline().strip() == "ready"
     assert job.collection_in_progress()
-    stale = datetime.now(timezone.utc) - staging.COLLECTION_LOCK_STALE_AFTER - timedelta(minutes=1)
-    job.collection_started_at = stale.isoformat()
+    child.kill()
+    child.wait(10)
     assert not job.collection_in_progress()
+
+
+def test_a_pending_submission_holds_its_papers_and_yields_to_its_accepted_job(_staging_dir):
+    job = _job(batch_id=None)
+    job.save()
+    assert job.path.name.startswith("_pending_")
+    assert staging.load_pending_submissions()[0].job_id == job.job_id
+    assert "a" * 64 in staging.in_flight_shas()
+    # Accepted: the journal entry becomes the job.
+    job.batch_id = "msgbatch_9"
+    job.save()
+    assert staging.load_pending_submissions() == []
+    assert list(staging.load_batch_jobs()) == ["msgbatch_9"]
+    # A crash between writing the job and removing the journal leaves both; the job wins.
+    stale = BatchJob.from_dict({**json.loads(job.path.read_text()), "batch_id": None})
+    staging._write_json(stale.path, json.loads(job.path.read_text()) | {"batch_id": None})
+    assert staging.load_pending_submissions() == [] and list(staging.load_batch_jobs()) == ["msgbatch_9"]
+
+
+def test_a_claimed_paper_is_in_flight_only_while_claimed(_staging_dir):
+    with staging.claim("c" * 64):
+        assert "c" * 64 in staging.in_flight_shas()
+        with pytest.raises(staging.Busy):
+            with staging.claim("c" * 64):
+                pass
+    assert "c" * 64 not in staging.in_flight_shas()
 
 
 # --------------------------------------------------------------------------- #
@@ -225,3 +317,14 @@ def test_failed_runs_log_round_trips_newest_first_and_skips_corrupt_lines(_stagi
     assert got[1]["usage"] is None
     assert got[0]["sha"] == _paper().sha and got[0]["filename"] == _paper().filename
     assert staging.load_failed_runs(limit=1) == got[:1]
+
+
+def test_a_failed_run_records_its_transcript_and_whether_credit_ran_out(_staging_dir):
+    from extraction.anthropic_client import CreditExhausted, ExtractionFailed
+    err = ExtractionFailed(CreditExhausted("no credit"), {"input_tokens": 0, "output_tokens": 5,
+                                                         "cache_creation_input_tokens": 0,
+                                                         "cache_read_input_tokens": 0})
+    err.transcript = "transcripts/msgbatch_1/aaa.json.gz"
+    staging.record_failed_run(_paper(), err, batch_id="msgbatch_1")
+    (got,) = staging.load_failed_runs()
+    assert got["transcript"] == "transcripts/msgbatch_1/aaa.json.gz" and got["credit_exhausted"] is True

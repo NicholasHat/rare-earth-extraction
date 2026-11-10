@@ -20,7 +20,8 @@ def _good_curve(element="La", n=12, start=10.0, step=7.0):
 
 
 def test_clean_extraction_passes_green():
-    report = checks.run(_df(_good_curve()), [], figure_is_curve=True)
+    rows = [dict(r, **{"Figure/Table": "Fig. 2"}) for r in _good_curve()]
+    report = checks.run(_df(rows), [], figure_is_curve=True)
     assert report.verdict is Severity.GREEN
     assert report.passed
 
@@ -32,13 +33,13 @@ def test_sparse_result_is_red():
     assert any(f.check == "row_count_sanity" for f in report.reds)
 
 
-def test_a_few_real_markers_are_a_warning_not_a_gate():
-    # Quinn et al. 2015 series really have 4-7 markers; gating on that would
-    # push a re-extraction to pad them.
-    rows = [{EL: "Tb", "pH": 1.0 + 0.37 * i, "Extract%": 10.0 + 12.0 * i} for i in range(6)]
+def test_a_few_real_markers_are_not_flagged():
+    # Quinn et al. 2015 series really have 4-7 markers, as did most curves of
+    # the 2026-11 trial; flagging that would push a re-extraction to pad them.
+    rows = [{EL: "Tb", "pH": 1.0 + 0.37 * i, "Extract%": 10.0 + 12.0 * i, "Figure/Table": "Fig. 3"}
+            for i in range(6)]
     report = checks.run(_df(rows), [], figure_is_curve=True)
-    assert report.passed
-    assert any(f.check == "row_count_sanity" for f in report.ambers)
+    assert report.verdict is Severity.GREEN
 
 
 def _line_series(element, n, *, step=0.1, noise=None):
@@ -338,8 +339,96 @@ def test_duplicate_rows_names_same_curve_repeats_but_not_cross_series_copies():
     rows.append(dict(rows[2], Extractant="Cyanex 272"))         # same triple under another extractant
     report = checks.run(_df(rows), [], figure_is_curve=True)
     (flag,) = [f for f in report.flags if f.check == "duplicate_rows"]
-    assert flag.rows == (13,)          # only the same-curve repeat is droppable
-    assert "4 row(s)" in flag.message  # both pairs are still reported
+    assert flag.rows == (13,)          # only the same-curve repeat is flagged, and droppable
+    assert "1 row(s)" in flag.message
+
+
+def test_equal_pct_across_a_concentration_sweep_or_two_figures_is_not_a_duplicate():
+    """The 2026-10 trial's false positives: a concentration sweep below
+    detection (0.02 %E at every concentration, one pH), and one measurement
+    plotted in both a pH sweep (Fig. 1) and a concentration sweep (Fig. 2)."""
+    below_detection = [{EL: "La", "pH": 4.94, "Extract%": 0.02, "Extractant Conc. (mM)": c,
+                        "Figure/Table": "Fig. 5c"} for c in (10, 30, 50, 100, 300)]
+    shared = [{EL: "Y", "pH": 4.0, "Extract%": 33.1, "Extractant Conc. (mM)": 500.0, "Figure/Table": f}
+              for f in ("Fig. 1", "Fig. 2")]
+    kinetics = [{EL: "Nd", "pH": 2.5, "Extract%": 20.7, "Contact time (minute)": t, "Figure/Table": "Fig. 7"}
+                for t in (15, 30, 60)]
+    report = checks.run(_df(below_detection + shared + kinetics), [], figure_is_curve=True)
+    assert not any(f.check == "duplicate_rows" for f in report.flags)
+
+
+def test_monotonicity_does_not_pool_a_kinetics_figure_into_the_ph_sweep():
+    """49558d1d on the trial: Eu's pH sweep (Fig. 6, 60 min) and its kinetics
+    run (Fig. 7, pH 2.5) share the 60-minute contact time; pooled, the
+    kinetics points made the pH sweep 'non-monotonic'."""
+    sweep = [{EL: "Eu", "pH": ph, "Extract%": pct, "Contact time (minute)": 60, "Figure/Table": "Fig. 6"}
+             for ph, pct in [(1.95, 18.9), (2.45, 61.0), (2.72, 60.3), (2.78, 58.3), (2.84, 59.8), (2.88, 52.6), (2.91, 55.7)]]
+    kinetics = [{EL: "Eu", "pH": 2.5, "Extract%": pct, "Contact time (minute)": t, "Figure/Table": "Fig. 7"}
+                for t, pct in [(15, 34.6), (30, 44.1), (60, 49.7), (90, 55.7)]]
+    assert not any(f.check == "monotonicity" for f in checks.run(_df(sweep + kinetics), []).flags)
+    pooled = [dict(r, **{"Figure/Table": None}) for r in sweep + kinetics]
+    assert any(f.check == "monotonicity" for f in checks.run(_df(pooled), []).flags)
+
+
+def _d_row(d, oa, pct, element="Tb"):
+    return {EL: element, "pH": 2.0, "Extract%": pct, "Distribution ratio (D)": d,
+            "Phase ratio (O/A)": oa, "Figure/Table": "Table 2"}
+
+
+def test_pct_e_must_match_d_at_the_rows_phase_ratio():
+    ok = [_d_row(1.0, 1.0, 50.0), _d_row(24, 0.01, 19.4), _d_row(500, 1, 100), _d_row(0.02, 1, 2.0),
+          _d_row(3.0, 2.0, 85.7)]
+    assert not any(f.check == "arithmetic" for f in checks.run(_df(ok), [], figure_is_curve=False).flags)
+    # A resin's D (mL/g) converted with R = 1 instead of V/m = 100 (the v13 Wang 1998 error),
+    # and a log D (1.3) stored as D.
+    bad = [_d_row(24, 0.01, 96.0), _d_row(1.3, 1.0, 95.2)]
+    (flag,) = [f for f in checks.run(_df(ok + bad), [], figure_is_curve=False).reds if f.check == "arithmetic"]
+    assert flag.rows == (6, 7)
+
+
+def test_negative_d_or_nonpositive_phase_ratio_is_out_of_bounds():
+    report = checks.run(_df([_d_row(-1.3, 1.0, None), _d_row(None, 0.0, 40.0)]), [], figure_is_curve=False)
+    msgs = " ".join(f.message for f in report.reds if f.check == "axis_bounds")
+    assert "Distribution ratio (D)" in msgs and "Phase ratio (O/A)" in msgs
+
+
+def test_ph_type_vocabulary():
+    rows = [dict(r, **{"pH type": t, "Figure/Table": "Fig. 1"})
+            for r, t in zip(_good_curve(n=3), ("equilibrium", "Initial", "final"))]
+    (flag,) = [f for f in checks.run(_df(rows), []).flags if f.check == "ph_type"]
+    assert "'final'" in flag.message and "Initial" not in flag.message
+
+
+def test_rows_without_a_source_are_a_provenance_warning():
+    rows = _good_curve()
+    rows[0]["Figure/Table"] = "Fig. 2"
+    (flag,) = [f for f in checks.run(_df(rows), []).flags if f.check == "provenance"]
+    assert flag.severity is Severity.AMBER and "11 of 12" in flag.message
+
+
+def test_text_endpoint_for_one_of_several_loadings_is_a_warning_not_a_gate():
+    """557600c4 on the trial: 'about 70 % for Cyanex 272 at pH 4.5–4.75' was
+    compared with another resin loading's 96 %. With several curves of the
+    element along pH, the statement can't be pinned to one of them."""
+    def curve(conc, top):
+        return [{EL: "Nd", "pH": 1.0 + 0.5 * i, "Extract%": min(top, 10.0 + 12.0 * i),
+                 "Extractant": "Cyanex 272", "Extractant Conc. (mM)": conc, "Figure/Table": "Fig. 3"}
+                for i in range(9)]
+    ep = [{"element": "Nd", "x_value": 4.6, "x_basis": "pH", "y_value": 70.0, "y_metric": "Extract%",
+           "extractant": "Cyanex272"}]
+    report = checks.run(_df(curve(7.84, 96.3) + curve(4.0, 99.0)), ep)
+    flags = [f for f in report.flags if f.check == "text_endpoint_cross_check"]
+    assert flags and all(f.severity is Severity.AMBER for f in flags)
+    # One curve: the same mismatch gates the merge.
+    report = checks.run(_df(curve(7.84, 96.3)), ep)
+    assert any(f.check == "text_endpoint_cross_check" for f in report.reds)
+
+
+def test_text_endpoint_element_match_is_exact_not_a_substring():
+    """'Y' must not match 'Yb' rows."""
+    rows = [{EL: "Yb", "pH": 1.0 + 0.3 * i, "Extract%": 10.0 + 7.0 * i, "Figure/Table": "Fig. 1"} for i in range(10)]
+    ep = [{"element": "Y", "x_value": 2.2, "x_basis": "pH", "y_value": 95.0, "y_metric": "Extract%"}]
+    assert not any(f.check == "text_endpoint_cross_check" for f in checks.run(_df(rows), ep).flags)
 
 
 def _feed_rows(element, ppm, mm, conc=500.0, ratio=None, n=8):
@@ -392,3 +481,177 @@ def test_one_element_at_two_feed_levels_is_two_curves():
         {**r, "Extract%": 95.0 - r["Extract%"]} for r in _feed_rows("La", 25.0, 25.0 / 138.91)]
     flags = checks.run(_df(rows), [], figure_is_curve=True).flags
     assert not any(f.check in ("monotonicity", "duplicate_rows") for f in flags)
+
+
+# --------------------------------------------------------------------------- #
+# The 2026-11 trial (extraction_v15): a curve is element + figure + every
+# fixed condition, along the figure's own x axis (validation/curves.py).
+# --------------------------------------------------------------------------- #
+def _flags(rows, endpoints=(), check=None, **kw):
+    flags = checks.run(_df(rows), list(endpoints), **kw).flags
+    return [f for f in flags if check is None or f.check == check]
+
+
+def _kinetics(series: dict, fig="Fig. 4(b)", *, fixed):
+    """{series value: [%E at each time]} -> rows of one kinetics figure."""
+    times = (1, 3, 5, 10, 20, 50)
+    return [{EL: "Dy", "Contact time (minute)": t, "Extract%": e, "pH": 5.8, "Figure/Table": fig,
+             **fixed(v)} for v, pcts in series.items() for t, e in zip(times, pcts)]
+
+
+def test_series_differing_only_in_a_descriptor_are_separate_curves():
+    """aee49f5e Fig. 4(b): rpm series pooled into one zig-zag; c48d4843:
+    saponified vs not, told apart only in Material Process."""
+    rpm = _kinetics({100: [5, 10, 15, 20, 25, 28], 300: [20, 40, 60, 75, 90, 95], 400: [20, 41, 60, 76, 90, 95]},
+                    fixed=lambda v: {"mixing method": f"stirring {v} rpm"})
+    assert not _flags(rpm, check="monotonicity") and not _flags(rpm, check="duplicate_rows")
+    sapon = [{EL: "Gd", "pH": ph, "Extract%": e, "Material Process": mp, "Figure/Table": "Fig. 13"}
+             for mp, pcts in (("adjust pH", (30.8, 38.5, 38.9, 41.0)), ("saponification 30%", (49.7, 50.4, 52.5, 55.0)))
+             for ph, e in zip((2.5, 3.0, 3.5, 4.0), pcts)]
+    assert not _flags(sapon, check="monotonicity")
+
+
+def test_a_figure_x_axis_is_found_not_assumed():
+    from validation import curves
+    grid = _kinetics({ph: [ph * 2 + t for t in (1, 3, 5, 10, 20, 50)] for ph in (1, 2, 3, 4, 5, 5.8)},
+                     fixed=lambda v: {"pH": v})
+    assert curves.figure_x(_df(grid)) == "Contact time (minute)"     # a time × pH grid is kinetics
+    # An acid sweep that also records each point's pH: along the acid, not the pH.
+    acid = [{EL: "Nd", "Acid Solution conc. (M)": c, "pH": round(1 - c, 2), "Extract%": 10 * c} for c in (0.1, 0.5, 1, 2)]
+    assert curves.figure_x(_df(acid)) == "Acid Solution conc. (M)"
+    # One bar per extractant: nothing varies within a series.
+    bars = [{EL: el, "Extractant": ex, "Extractant Conc. (mM)": c, "pH": 4.4, "Extract%": 50.0}
+            for el in ("La", "Ce") for ex, c in (("D2EHPA", 1000), ("EHEHPA", 900), ("Cyanex 572", 1050))]
+    assert curves.figure_x(_df(bars)) is None
+
+
+def test_monotonicity_judges_the_curve_along_its_own_x():
+    zigzag = _kinetics({1: [10, 40, 15, 50, 20, 60]}, fixed=lambda v: {})
+    (flag,) = _flags(zigzag, check="monotonicity")
+    assert "Contact time (minute)" in flag.message
+    # A single maximum is chemistry (aee49f5e Fig. 8(a), 65 °C: the emulsion breaks), not a misread.
+    hump = _kinetics({1: [15, 30, 70, 77, 50, 8]}, fixed=lambda v: {})
+    assert not _flags(hump, check="monotonicity")
+
+
+def test_off_curve_skips_initial_ph_and_curves_that_level_off():
+    """78ebe569 Fig. 12: initial-pH curves levelling off at ~35 % (rows 58,
+    59, 62 were called off-curve)."""
+    level = [{EL: "Nd", "pH": x, "Extract%": e, "Figure/Table": "Fig. 12"} for x, e in
+             [(0.88, 1.3), (1.36, 3.05), (1.72, 8.84), (1.89, 12.4), (2.06, 19.0), (2.26, 22.5),
+              (2.66, 33.4), (2.75, 35.1), (3.20, 35.4), (4.63, 35.9), (6.54, 36.0)]]
+    assert not _flags(level, check="off_curve")
+    rows = _logistic_curve()
+    rows[6]["Extract%"] = 97.0
+    assert _flags(rows, check="off_curve")                                        # equilibrium / unrecorded
+    assert not _flags([dict(r, **{"pH type": "initial"}) for r in rows], check="off_curve")
+
+
+def test_row_count_is_per_curve_and_a_bar_chart_is_not_a_short_curve():
+    """868fbcf3 Fig. 7: one bar per extractant drew 11 'short curve' flags."""
+    bars = [{EL: el, "Extractant": ex, "pH": 4.4, "Extract%": 50.0, "Figure/Table": "Fig. 7"}
+            for el in ("La", "Ce", "Nd") for ex in ("D2EHPA", "EHEHPA", "Cyanex 572")]
+    assert not _flags(bars, check="row_count_sanity")
+    two = [{EL: "Nd", "pH": x, "Extract%": e, "Figure/Table": "Fig. 2"} for x, e in ((1.0, 10), (4.0, 95))]
+    full = [{EL: "La", "pH": 1.0 + 0.3 * i, "Extract%": 10 + 7 * i, "Figure/Table": "Fig. 2"} for i in range(10)]
+    (flag,) = _flags(two + full, check="row_count_sanity")
+    assert flag.severity is Severity.RED and "Nd" in flag.message and "La" not in flag.message
+
+
+def test_a_series_with_under_half_its_siblings_points_is_amber():
+    """3b88a3f8 Fig. 5: Ce had 1 of 5 kinetics markers."""
+    rows = [{EL: el, "Contact time (minute)": t, "Extract%": 50 + t, "Figure/Table": "Fig. 5"}
+            for el in ("La", "Pr", "Nd") for t in (5, 10, 15, 20, 25)]
+    rows += [{EL: "Ce", "Contact time (minute)": 15, "Extract%": 81.5, "Figure/Table": "Fig. 5"}]
+    (flag,) = _flags(rows, check="sparse_sibling")
+    assert flag.severity is Severity.AMBER and "Ce" in flag.message and "La" not in flag.message
+    assert not _flags(rows[:-1], check="sparse_sibling")
+
+
+def test_rows_with_equal_conditions_and_different_values_are_red():
+    """00fbdc33 Fig. 1: a Cyanex 923 wt% sweep — no column for the x — became
+    six rows per element with identical conditions."""
+    rows = [{EL: el, "Extractant": "Cyanex 923", "pH": 2.5, "Extract%": e, "Figure/Table": "Fig. 1"}
+            for el, pcts in (("Nd", (7.7, 14.0, 17.8, 22.1)), ("Dy", (32.5, 54.4, 64.4, 69.5))) for e in pcts]
+    (flag,) = _flags(rows, check="repeated_x")
+    assert flag.severity is Severity.RED and "8 row(s)" in flag.message
+    # The same rows inside a sweep whose other rows do carry the x.
+    sweep = [{EL: "Nd", "Extractant": "Cyanex 923", "pH": 2.5, "Extract%": 10.0 * c, "Extractant Conc. (mM)": 100 * c,
+              "Figure/Table": "Fig. 1"} for c in (1, 2, 3, 4)]
+    assert _flags(sweep + rows[:4], check="repeated_x") and not _flags(sweep, check="repeated_x")
+    # Replicates within noise are not a lost axis.
+    assert not _flags([dict(r, **{"Extract%": 20.0 + i}) for i, r in enumerate(rows[:4])], check="repeated_x")
+
+
+def test_back_extraction_percentages_belong_in_recovery():
+    """f5038b04: 70 stripping rows in Extract%."""
+    strip = [{EL: "Er", "Treatment": "Stripping", "Acid Solution conc. (M)": c, "Extract%": e, "Figure/Table": "Table 3"}
+             for c, e in ((0.5, 40), (1, 70), (2, 95))]
+    (flag,) = _flags(strip, check="treatment_y_column")
+    assert flag.severity is Severity.RED and "1, 2, 3" in flag.message and not flag.rows
+    ok = [dict(r, **{"Extract%": None, "Recovery %": r["Extract%"]}) for r in strip]
+    ok[0]["Treatment"] = "Scrubbing"
+    assert not _flags(ok, check="treatment_y_column")
+    extraction_as_recovery = [dict(r, Treatment="Extraction only") for r in ok]
+    assert _flags(extraction_as_recovery, check="treatment_y_column")
+    # A combined process names extraction first: its Extract% rows are extraction rows.
+    assert not _flags([dict(r, Treatment="Extraction + Stripping") for r in strip], check="treatment_y_column")
+
+
+def test_d_vs_pct_arithmetic_ignores_stripping_rows():
+    rows = [dict(_d_row(2.0, 1.0, 90.0), Treatment="Stripping")]      # a stripping D is not this %E's D
+    assert not _flags(rows, check="arithmetic")
+    assert _flags([dict(rows[0], Treatment="Extraction only")], check="arithmetic")
+
+
+def test_text_endpoints_are_checked_on_every_x_column():
+    rows = [{EL: "La", "Contact time (minute)": t, "Extract%": e, "Figure/Table": "Fig. 5"}
+            for t, e in ((5, 55.3), (10, 61.8), (15, 72.1), (20, 80.5), (25, 82.0))]
+    ep = {"element": "La", "x_basis": "Contact time (minute)", "x_value": 20, "y_metric": "Extract%"}
+    assert not _flags(rows, [dict(ep, y_value=80.7)], check="text_endpoint_cross_check")
+    (flag,) = _flags(rows, [dict(ep, y_value=95.0)], check="text_endpoint_cross_check")
+    assert flag.severity is Severity.RED
+
+
+def test_text_endpoints_on_no_schema_column_or_with_x_equal_to_y_are_amber():
+    rows = _good_curve("Pr")
+    eps = [{"element": "Pr", "x_basis": "Cyanex 923 wt%", "x_value": 40, "y_metric": "Extract%", "y_value": 60},
+           {"element": "Pr", "x_basis": "pH", "x_value": 0.49, "y_metric": "D", "y_value": 0.49},
+           {"element": "Pr", "x_basis": "whatever", "x_value": None, "y_metric": "Extract%", "y_value": 32.9}]
+    flags = _flags(rows, eps, check="text_endpoint_cross_check")
+    assert {f.severity for f in flags} == {Severity.AMBER} and len(flags) == 2
+    assert any("'Cyanex 923 wt%'" in f.message for f in flags) and any("equals" in f.message for f in flags)
+
+
+def _sf_pair(co, er, y, sf, fig="Fig. 7", **extra):
+    return [{EL: el, "Co-extractant Conc. (mM)": co, "Extract%": e, "Separation factor (SF%)": sf,
+             "Figure/Table": fig, **extra} for el, e in (("Er", er), ("Y", y))]
+
+
+def test_a_separation_factor_that_fits_only_with_the_elements_swapped_is_amber():
+    """0346dd7e Fig. 7, rows 62/72: Y 98.2 / Er 97.0 under SF 1.537 (Er/Y
+    1.47–1.84 at every other point), i.e. the two values exchanged."""
+    rows = (_sf_pair(120, 87.7, 82.83, 1.460) + _sf_pair(160, 90.3, 85.42, 1.577)
+            + _sf_pair(200, 93.41, 88.43, 1.836) + _sf_pair(240, 97.03, 98.20, 1.537))
+    (flag,) = _flags(rows, check="separation_factor")
+    assert "rows 7, 8" in flag.message and "0.599" in flag.message
+    # An SF fitting neither direction is the paper's own inconsistency (0346dd7e Fig. 3).
+    odd = rows[:6] + _sf_pair(240, 95.33, 88.93, 1.59)
+    assert not _flags(odd, check="separation_factor")
+    # With the pair stated, one point is enough.
+    stated = _sf_pair(240, 97.03, 98.20, 1.537, **{"Material Process": "SF Er/Y"})
+    assert _flags(stated, check="separation_factor")
+    assert not _flags(_sf_pair(240, 97.03, 98.20, 1.537), check="separation_factor")   # no direction known
+
+
+def test_mixing_method_detail_is_not_vocabulary_drift():
+    from validation import vocab
+    assert vocab.unknown_values("mixing method", ["stirring, 450 rpm", "shaking 2000 rpm",
+                                                  "mechanical shaker (300 rpm)", "impeller", "Stirring"]) == []
+    assert vocab.unknown_values("mixing method", ["stiring", "sonication 5 min"]) == ["stiring", "sonication 5 min"]
+
+
+def test_element_groups_are_out_of_scope():
+    rows = [{EL: g, "Extractant Conc. (mM)": c, "Extract%": 50.0} for g in ("LREE", "HREE") for c in (100, 200, 300)]
+    (flag,) = _flags(rows, check="element_scope")
+    assert flag.severity is Severity.RED and "element group" in flag.message

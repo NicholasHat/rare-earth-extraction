@@ -1,6 +1,8 @@
 """Tests for the paper tracking sheet: export naming, the reviewer-entered
 tracking fields on `papers`, and browse.tracking_sheet's spreadsheet shape."""
 import pandas as pd
+
+from ingestion.licensing import License
 import pytest
 
 from database import browse, merge, naming, papers_repo
@@ -66,6 +68,7 @@ def _sample_df(n=3):
 def _commit(conn, tracking=None, prompt_version="extraction_v9"):
     return merge.commit_extraction(
         conn,
+        license=License("cc-by", origin="manifest"),
         content_sha256="hash1",
         pdf_path="data/incoming/hash1.pdf",
         df=_sample_df(),
@@ -124,6 +127,18 @@ def test_tracking_sheet_empty_has_spreadsheet_columns(conn):
     df = browse.tracking_sheet(conn)
     assert df.empty
     assert list(df.columns) == browse.TRACKING_SHEET_COLUMNS
+
+
+def test_tracking_sheet_names_a_paper_with_no_short_citation_by_its_id(conn):
+    _commit(conn, tracking=TRACKING)
+    merge.commit_extraction(
+        conn, license=License("cc-by", origin="manifest"), content_sha256="hash2",
+        pdf_path="data/incoming/hash2.pdf", df=_sample_df(), text_endpoints=[],
+        prompt_version="extraction_v9", prompt_sha256="psha", model="claude-sonnet-5",
+        qa_passed=True, qa_report_json="[]", raw_response="{}", doi="10.1/other",
+    )
+    df = browse.tracking_sheet(conn)
+    assert list(df["Output file"]) == ["Swain_&_Otu_3.csv", "paper_2_3.csv"]
 
 
 def test_tracking_sheet_matches_spreadsheet_layout(conn):
