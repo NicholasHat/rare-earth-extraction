@@ -2,7 +2,7 @@
 
 ![status](https://img.shields.io/badge/status-actively%20developing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![tests](https://img.shields.io/badge/tests-215%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-390%20passing-brightgreen)
 
 A web app that turns rare-earth-element (REE) solvent-extraction **research
 papers into a structured, queryable database** — digitizing the data locked
@@ -25,8 +25,9 @@ gating, and a strict read/write boundary.
 
 - 📄 **Digitizes figures into data** — upload research-paper PDFs; a versioned
   prompt drives Claude to turn each *% Extraction vs. pH* / *log D vs.
-  [extractant]* plot into a fixed 26-column table, one row per data point per
-  element
+  [extractant]* plot into a fixed 35-column table (the lab's 26 spreadsheet
+  columns, then diluent, co-extractant, phase ratio, contact time, D, total
+  feed, pH type and source figure), one row per data point per element
 - 🔎 **Grounds the model against itself** — a deterministic pre-pass counts
   figure markers straight from the PDF's own vector geometry and hands the
   model the counts as ground truth, directly attacking silent
@@ -103,8 +104,10 @@ streamlit run app.py
 ```
 
 The app opens on the extraction page; the sidebar links to the Database
-browser, Calculator, and Lab Assistant. The SQLite database and data
-directories are created automatically on first run.
+browser, Calculator, Lab Assistant, and Analysis — curves, the pH of 50 %
+extraction across the lanthanide series, separation factors, slope analysis
+and a cross-paper overlay, computed from approved data and marked as computed.
+The SQLite database and data directories are created automatically on first run.
 
 ## Engineering notes
 
@@ -131,15 +134,31 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 297 tests, no live model or network required
+python -m pytest        # 390 tests, no live model or network required
 ```
 
 The suite covers unit conversions, the solve-for-the-blank calculator and its
 Extract% prediction, the QA checks, dedup, the atomic merge transaction and
 version supersession, the read-only SQL guard, the deterministic curve
 extractor and pre-pass, the extraction client's continuation and batch
-handling, the review-queue persistence, the tracking sheet, the evaluation
-tools, and the assistant's tools.
+handling (journaled submission, reconciliation, resumable continuations), the
+review-queue persistence, the open-licence merge gate, the bulk runner, the
+tracking sheet, the evaluation tools, and the assistant's tools.
+
+### Running many papers without the dashboard
+
+```bash
+python -m extraction.bulk submit --first-batch --dry-run   # what would be submitted, from data/open_access/manifest.csv
+python -m extraction.bulk submit --first-batch             # or: --tier A --limit 20
+python -m extraction.bulk status                           # reconcile with the API; jobs, review queue, cost
+python -m extraction.bulk collect                          # stage every ended batch for review
+```
+
+Every command is safe to interrupt and re-run: nothing is submitted twice, a
+collection resumes where it stopped without re-paying, and results only ever
+land in the review queue — the database is written when a person approves a
+paper in the dashboard, and only for a paper with an open licence. Batches
+started here show up in the dashboard's batch section, and vice versa.
 
 ### Comparing against the local pipeline
 
@@ -167,6 +186,10 @@ tables to score both against ground truth.
 - [x] Human review / edit / merge with an append-only audit log, plus an on-demand
       "re-extract with QA feedback" middle path
 - [x] Message Batches API path (50% cheaper) with transparent continuation of paused items; raster-figure papers always take it
+- [x] Unattended bulk runs (`python -m extraction.bulk`): journaled submissions, API reconciliation,
+      every paid turn saved to disk, continuations that resume after a crash or an empty credit balance
+- [x] Open-licence gate: a paper's licence is recorded from the open-access manifest (or by hand) and
+      only openly-licensed papers can be merged
 - [x] Per-run token/cost telemetry and prompt caching across the code-execution loop
 - [x] Bench calculator with database sanity-checking and Extract% prediction (Pillar B)
 - [x] Tool-calling AI assistant over a guarded read-only SQL tool (Pillar C)
@@ -189,7 +212,7 @@ tables to score both against ground truth.
       hand-off, first live on a real paper), median error 0.01 %E against the approved data
 - [ ] **Reliable per-series counts on raster figures** — the vector path is
       ground truth today; the raster CV path is still a lower-confidence estimate
-- [ ] Bulk / selective re-extraction workflow when a new prompt version ships
+- [ ] Selective re-extraction of already-approved papers when a new prompt version ships
 - [ ] Real per-user authentication (the current shared-password gate is a
       convenience gate, not real auth) for multi-user lab rollout
 
