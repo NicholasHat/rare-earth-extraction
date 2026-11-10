@@ -2,7 +2,7 @@
 
 ![status](https://img.shields.io/badge/status-actively%20developing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![tests](https://img.shields.io/badge/tests-390%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-463%20passing-brightgreen)
 
 A web app that turns rare-earth-element (REE) solvent-extraction **research
 papers into a structured, queryable database** — digitizing the data locked
@@ -134,7 +134,7 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 390 tests, no live model or network required
+python -m pytest        # 463 tests, no live model or network required
 ```
 
 The suite covers unit conversions, the solve-for-the-blank calculator and its
