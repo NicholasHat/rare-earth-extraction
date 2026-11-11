@@ -13,6 +13,9 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 
+# The hosted viewer's DB snapshot: published only to the private hosting repo (publish_viewer.sh)
+viewer_data/
+
 # Python
 __pycache__/
 *.py[cod]

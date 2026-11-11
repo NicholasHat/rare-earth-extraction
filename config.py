@@ -19,7 +19,9 @@ DATA_DIR = ROOT / "data"
 INCOMING_DIR = DATA_DIR / "incoming"   # persisted source PDFs, named <sha256>.pdf
 STAGING_DIR = DATA_DIR / "staging"     # per-paper extracted XLSX awaiting review
 EXPORTS_DIR = DATA_DIR / "exports"     # approved per-paper CSV exports (<citation>_<rows>.csv)
-DB_PATH = DATA_DIR / "master.db"       # the SQLite master database
+# The SQLite master database. DB_PATH overrides it — the hosted read-only
+# viewer (viewer.py) points it at the published snapshot.
+DB_PATH = Path(os.getenv("DB_PATH", "") or DATA_DIR / "master.db").expanduser()
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"  # every paid model turn, per run (extraction/transcripts.py)
 
 # The openly-licensed paper set curated by the open-access agent:
