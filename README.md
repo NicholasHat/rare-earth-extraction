@@ -2,7 +2,7 @@
 
 ![status](https://img.shields.io/badge/status-actively%20developing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![tests](https://img.shields.io/badge/tests-500%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-524%20passing-brightgreen)
 
 A web app that turns rare-earth-element (REE) solvent-extraction **research
 papers into a structured, queryable database** — digitizing the data locked
@@ -15,8 +15,9 @@ number is versioned, QA-checked, and human-reviewed before it's trusted.
 > QA suite, human review & merge, a calculator, and a tool-calling assistant.
 > Bulk runs (prompts `extraction_v15`–`v16`, Batches API) put 4,805 rows from 52
 > openly-licensed papers into the database, each paper approved in the review
-> queue (2026-11-10). Current work is widening what the deterministic pre-pass
-> can vouch for — see the [roadmap](#roadmap).
+> queue (2026-11-10); since 2026-11-16 the audit log also records, cell by cell,
+> what the reviewer changed before approving. Current work is widening what the
+> deterministic pre-pass can vouch for — see the [roadmap](#roadmap).
 
 Built to solve a real problem for a UCI chemistry lab (thousands of papers,
 none of them machine-readable) and, along the way, to work through the hard
@@ -139,7 +140,7 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 500 tests, no live model or network required
+python -m pytest        # 524 tests, no live model or network required
 ```
 
 Three of them read the Swain & Otu PDF from `data/incoming/` and are skipped
@@ -148,8 +149,9 @@ Extract% prediction, the QA checks, dedup, the atomic merge transaction and
 version supersession, the read-only SQL guard, the deterministic curve
 extractor and pre-pass, the extraction client's continuation and batch
 handling (journaled submission, reconciliation, resumable continuations), the
-review-queue persistence, the open-licence merge gate, the bulk runner, the
-tracking sheet, the evaluation tools, and the assistant's tools.
+review-queue persistence, the open-licence merge gate, the audit log's record
+of review edits, the bulk runner, the tracking sheet, the evaluation tools, and
+the assistant's tools.
 
 ### Running many papers without the dashboard
 
@@ -189,7 +191,8 @@ tables to score both against ground truth.
 - [x] Sandbox toolkit: the repo's raster digitizer (frame, ticks, markers, axis fit) shipped
       into the model's code-execution sandbox (`extraction_v11`, legend-swatch workflow since `extraction_v13`); `extraction_v12`+ targets each
       figure's real marker count and QA rejects series sampled off a fitted line
-- [x] Human review / edit / merge with an append-only audit log, plus an on-demand
+- [x] Human review / edit / merge with an append-only audit log that records each
+      reviewer edit (rows deleted or added, cells old → new), plus an on-demand
       "re-extract with QA feedback" middle path
 - [x] Message Batches API path (50% cheaper) with transparent continuation of paused items; raster-figure papers always take it
 - [x] Unattended bulk runs (`python -m extraction.bulk`): journaled submissions, API reconciliation,
@@ -200,11 +203,14 @@ tables to score both against ground truth.
 - [x] Bench calculator with database sanity-checking and Extract% prediction (Pillar B)
 - [x] Tool-calling AI assistant over a guarded read-only SQL tool (Pillar C)
 - [x] Tracking-sheet view mirroring the lab's paper-tracking spreadsheet, with per-paper exports
+- [x] Live validation at scale — `extraction_v15`–`v16` through the Batches API on 52
+      open-access papers (40 of them raster), each one approved in the review queue
+- [x] Axis tick-label reading on vector figures — 9 of 10 Swain & Otu axes calibrate
+      (was 0); the pre-pass now hands the model 171 pre-digitised Fig. 2 points (`extraction_v8`
+      hand-off, first live on a real paper), median error 0.01 %E against the approved data
 
 **Building next**
 
-- [x] **Live validation at scale** — `extraction_v15`–`v16` through the Batches API on 52
-      open-access papers (40 of them raster), each one approved in the review queue
 - [ ] **Tune the QA tolerances** on that run's flags (4 of the 52 papers were merged
       over a red flag, with the reason in the audit log)
 - [ ] **Move figure digitizing out of the model's code loop** — a sibling local-model
@@ -213,9 +219,6 @@ tables to score both against ground truth.
       cost of the current loop grows with the square of its length
 - [ ] **Monochrome figures as ground truth** — stroked-glyph markers (×/+/✶) are
       now assembled but need an oracle paper before the pre-pass can vouch for them
-- [x] **Axis tick-label reading on vector figures** — 9 of 10 Swain & Otu axes calibrate
-      (was 0); the pre-pass now hands the model 171 pre-digitised Fig. 2 points (`extraction_v8`
-      hand-off, first live on a real paper), median error 0.01 %E against the approved data
 - [ ] **Reliable per-series counts on raster figures** — the vector path is
       ground truth today; the raster CV path is still a lower-confidence estimate
 - [ ] Selective re-extraction of already-approved papers when a new prompt version ships
