@@ -19,6 +19,29 @@ def test_existing_limit_not_duplicated():
     assert "LIMIT 10" in out
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A LIMIT that caps a subquery or a CTE, not the result.
+        "SELECT * FROM v_current_best WHERE paper_id IN (SELECT paper_id FROM papers LIMIT 5)",
+        "WITH p AS (SELECT paper_id FROM papers LIMIT 5) SELECT * FROM v_current_best",
+        # The word in a string or a quoted name.
+        """SELECT * FROM v_current_best WHERE "Extractant" != 'limit'""",
+        'SELECT "limit" FROM v_current_best',
+    ],
+)
+def test_the_default_limit_is_added_unless_the_statement_itself_has_one(sql):
+    assert guard(sql).endswith(" LIMIT 500")
+
+
+def test_the_default_limit_caps_the_rows_a_query_returns(conn):
+    conn.executemany("INSERT INTO papers (content_sha256, pdf_path) VALUES (?, 'x.pdf')",
+                     [(f"{i:064d}",) for i in range(600)])
+    out = json.loads(tools.query_database(
+        conn, "SELECT paper_id FROM papers WHERE paper_id IN (SELECT paper_id FROM papers LIMIT 550)"))
+    assert len(out) == 500
+
+
 def test_with_cte_passes():
     sql = 'WITH x AS (SELECT pH FROM v_current_best) SELECT * FROM x'
     out = guard(sql)

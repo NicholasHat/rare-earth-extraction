@@ -51,7 +51,6 @@ _TOKEN_RE = re.compile(
       | (?P<other>.)""",
     re.VERBOSE | re.DOTALL,
 )
-_LIMIT_RE = re.compile(r"\bLIMIT\b", re.IGNORECASE)
 _LEADING_RE = re.compile(r"^(SELECT|WITH)\b", re.IGNORECASE)
 
 # Actions that carry no relation to check: SQLITE_SELECT is emitted once per
@@ -66,17 +65,18 @@ class SQLGuardError(ValueError):
 
 
 def _tokens(sql: str) -> list[tuple[str, str]]:
-    """(kind, text) for every token but whitespace; a quoted token's text is
-    its unquoted name and a word's is lower-cased, so both compare as names."""
+    """(kind, text) for every token but whitespace: kind is 'word' (a bare
+    identifier or keyword), 'quoted' (text unquoted -- a string or a quoted
+    name, which SQLite treats alike) or 'other'. Names are lower-cased."""
     out = []
     for m in _TOKEN_RE.finditer(sql):
         kind, text = m.lastgroup, m.group()
         if kind == "quoted":
             q = text[0]
             text = text[1:-1].replace(q * 2, q) if q != "[" else text[1:-1]
-            out.append(("name", text.lower()))
+            out.append(("quoted", text.lower()))
         elif kind == "word":
-            out.append(("name", text.lower()))
+            out.append(("word", text.lower()))
         elif kind == "other":
             out.append(("other", text))
     return out
@@ -87,7 +87,7 @@ def _cte_names(tokens: list[tuple[str, str]]) -> set[str]:
     `name [(columns)] AS [[NOT] MATERIALIZED] (`, the name bare or quoted."""
     names = set()
     for i, (kind, text) in enumerate(tokens):
-        if kind != "name":
+        if kind not in ("word", "quoted"):
             continue
         j = i + 1
         if j < len(tokens) and tokens[j] == ("other", "("):   # a column list
@@ -97,15 +97,27 @@ def _cte_names(tokens: list[tuple[str, str]]) -> set[str]:
                 if depth == 0:
                     break
             j += 1
-        if j >= len(tokens) or tokens[j] != ("name", "as"):
+        if j >= len(tokens) or tokens[j] != ("word", "as"):
             continue
         j += 1
         for optional in ("not", "materialized"):
-            if j < len(tokens) and tokens[j] == ("name", optional):
+            if j < len(tokens) and tokens[j] == ("word", optional):
                 j += 1
         if j < len(tokens) and tokens[j] == ("other", "("):
             names.add(text)
     return names
+
+
+def _has_outer_limit(tokens: list[tuple[str, str]]) -> bool:
+    """Whether the statement itself ends in a LIMIT -- not a subquery or CTE
+    (which caps only its own rows), and not the word inside a string."""
+    depth = 0
+    for kind, text in tokens:
+        if kind == "other":
+            depth += {"(": 1, ")": -1}.get(text, 0)
+        elif kind == "word" and depth == 0 and text == "limit":
+            return True
+    return False
 
 
 def _allow_list_error(names) -> str:
@@ -159,7 +171,7 @@ def guard(sql: str) -> str:
     if disallowed:
         raise SQLGuardError(_allow_list_error(disallowed))
 
-    if not _LIMIT_RE.search(body):
+    if not _has_outer_limit(_tokens(body)):
         body = f"{body.rstrip()} LIMIT {DEFAULT_LIMIT}"
 
     return body
