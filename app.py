@@ -417,8 +417,6 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
              tracking: dict[str, str], note: str, override: bool) -> None:
     paper, result = staged.paper, staged.result
     edited_clean = schema.coerce_schema(edited)
-    was_edited = not edited_clean.reset_index(drop=True).equals(result.df.reset_index(drop=True))
-    merge_note = note or ("edited in review" if was_edited else None)
     qa = _edited_qa(staged, edited_clean)
     if not qa.passed and not override:
         st.error("The table as edited has red QA flags — fix them, or tick the override box: "
@@ -432,6 +430,7 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
             content_sha256=paper.sha,
             pdf_path=paper.pdf_path,
             df=edited_clean,
+            extracted=result.df,   # what the reviewer changed goes in the audit log
             text_endpoints=result.text_endpoints,
             prompt_version=result.prompt_version,
             prompt_sha256=result.prompt_sha256,
@@ -446,7 +445,7 @@ def _approve(sha: str, staged: StagedPaper, edited: pd.DataFrame,
             figure_type=None,
             is_raster_figure=paper.meta.get("is_raster_figure"),
             tracking=tracking,
-            note=merge_note,
+            note=note,
             override=override,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,

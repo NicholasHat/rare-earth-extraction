@@ -9,7 +9,7 @@ import sqlite3
 
 import pandas as pd
 
-from . import naming
+from . import edit_diff, naming
 
 
 def list_papers(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -113,10 +113,14 @@ def list_prompt_runs(conn: sqlite3.Connection, paper_id: int | None = None) -> p
 
 
 def list_review_log(conn: sqlite3.Connection, paper_id: int | None = None) -> pd.DataFrame:
-    """The append-only approve/edit/reject audit trail (no reviewer identity, by design)."""
+    """The append-only approve/edit/reject audit trail (no reviewer identity, by design).
+
+    `edits` summarises what the reviewer changed before approving (from
+    `edited_diff_json`, the full record; empty for an unedited paper and for
+    approvals from before it was recorded)."""
     sql = """
         SELECT rl.review_id, rl.paper_id, p.doi, rl.prompt_run_id, rl.action,
-               rl.note, rl.created_at
+               rl.note, rl.created_at, rl.edited_diff_json
         FROM review_log rl
         JOIN papers p ON p.paper_id = rl.paper_id
     """
@@ -125,4 +129,6 @@ def list_review_log(conn: sqlite3.Connection, paper_id: int | None = None) -> pd
         sql += " WHERE rl.paper_id = ?"
         params = (paper_id,)
     sql += " ORDER BY rl.review_id DESC"
-    return pd.read_sql_query(sql, conn, params=params)
+    log = pd.read_sql_query(sql, conn, params=params)
+    log.insert(log.columns.get_loc("note") + 1, "edits", log["edited_diff_json"].map(edit_diff.summary))
+    return log

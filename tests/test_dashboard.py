@@ -224,6 +224,35 @@ def test_edits_to_one_paper_are_kept_while_another_is_reviewed(monkeypatch):
     assert note == "checked Fig. 2"
 
 
+def test_what_the_reviewer_changed_is_in_the_audit_log_and_on_the_database_page(monkeypatch):
+    staging.stage(_paper("a", License("cc-by", origin="manifest")), False, _result(_CLEAN))
+    a = "a" * 64
+    at = _run()
+    _browser_sends(monkeypatch, _editor_key(at, a), {
+        "edited_rows": {"0": {"pH": 1.5}},
+        "deleted_rows": [3],
+        "added_rows": [{schema.ELEMENT_COLUMN: "Nd", "pH": 2.0, "Extract%": 40.0, "Figure/Table": "Table 1"}],
+    })
+    at.run()
+    _button(at, "Approve & merge").click().run()
+    assert not at.exception
+    conn = connection.get_conn()
+    try:
+        note, diff = conn.execute("SELECT note, edited_diff_json FROM review_log").fetchone()
+    finally:
+        conn.close()
+    diff = json.loads(diff)
+    assert note == "edited in review"
+    assert diff["changed"] == [{"row": 1, "column": "pH", "old": 1, "new": 1.5}]
+    assert [d["row"] for d in diff["deleted"]] == [4]
+    assert diff["added"] == [{"values": {schema.ELEMENT_COLUMN: "Nd", "pH": 2, "Extract%": 40,
+                                         "Figure/Table": "Table 1"}}]
+
+    log = next(d.value for d in _run(str(ROOT / "pages" / "1_Database.py")).dataframe
+               if "edits" in d.value.columns)
+    assert log.iloc[0]["edits"] == "1 row deleted, 1 row added, 1 cell changed"
+
+
 def test_after_approve_or_reject_the_next_paper_in_the_list_is_selected(monkeypatch):
     for c in "abcd":
         staging.stage(_paper(c, License("cc-by", origin="manifest")), False, _result(_CLEAN))

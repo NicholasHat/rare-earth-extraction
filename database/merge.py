@@ -7,6 +7,10 @@ never exist. It is the single write path used by the review UI on 'approve'.
 It is also the open-licence gate: a paper whose recorded licence is not open
 (config.OPEN_LICENSES) — or that has none — is refused before anything is
 written, and the first merge of each day leaves a backup of the DB first.
+
+Given the table as extracted, it also records what the reviewer changed
+(`edit_diff.table_diff`) on the approval's review_log row, in the same
+transaction as the rows themselves.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import pandas as pd
 import config
 from ingestion.licensing import License, is_open
 
-from . import connection, extractions_repo, papers_repo, review_repo
+from . import connection, edit_diff, extractions_repo, papers_repo, review_repo
 
 
 class LicenseRequired(RuntimeError):
@@ -30,6 +34,7 @@ def commit_extraction(
     content_sha256: str,
     pdf_path: str,
     df: pd.DataFrame,
+    extracted: pd.DataFrame | None = None,
     text_endpoints: list[dict],
     prompt_version: str,
     prompt_sha256: str,
@@ -66,6 +71,12 @@ def commit_extraction(
     the paper's row is used. Either way it must be open, or LicenseRequired is
     raised and nothing is written.
 
+    `df` is the table to merge; `extracted` is the same paper's table as the
+    model produced it, before review. When given, the reviewer's edits between
+    the two (rows deleted, rows added, cells changed — see `edit_diff`) are
+    stored as the approval's `review_log.edited_diff_json` (NULL for no edits),
+    and an edited table with no note is noted "edited in review".
+
     The whole thing runs in one transaction; any error rolls everything back.
     """
     existing = papers_repo.find_by_hash(conn, content_sha256) or papers_repo.find_by_doi(conn, doi)
@@ -77,6 +88,7 @@ def commit_extraction(
             f"({', '.join(sorted(config.OPEN_LICENSES))}) may enter the database. Record its licence "
             "(the open-access manifest, or set it by hand at review) — nothing was written."
         )
+    diff_json = edit_diff.to_json(edit_diff.table_diff(extracted, df)) if extracted is not None else None
     connection.backup_once_a_day(conn)
     try:
         with conn:  # BEGIN ... COMMIT on success, ROLLBACK on exception
@@ -130,16 +142,17 @@ def commit_extraction(
                 replaced_by=run_id,
             )
             review_repo.set_run_status(conn, run_id, "approved")
-            log_note = note
+            log_note = note or ("edited in review" if diff_json else None)
             if override and not qa_passed:
                 prefix = "[RED-flag override] "
-                log_note = prefix + (note or "approved despite red QA flags")
+                log_note = prefix + (log_note or "approved despite red QA flags")
             review_repo.log_review(
                 conn,
                 paper_id=paper_id,
                 prompt_run_id=run_id,
                 action="approve",
                 note=log_note,
+                edited_diff_json=diff_json,
             )
         return {
             "paper_id": paper_id,
