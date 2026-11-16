@@ -2,7 +2,7 @@
 
 ![status](https://img.shields.io/badge/status-actively%20developing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![tests](https://img.shields.io/badge/tests-463%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-500%20passing-brightgreen)
 
 A web app that turns rare-earth-element (REE) solvent-extraction **research
 papers into a structured, queryable database** — digitizing the data locked
@@ -13,8 +13,10 @@ number is versioned, QA-checked, and human-reviewed before it's trusted.
 > **Status:** the full spine is working and tested — ingestion, a versioned
 > LLM extraction pipeline with a deterministic figure pre-pass, an automatic
 > QA suite, human review & merge, a calculator, and a tool-calling assistant.
-> Current work is live validation on real papers and widening what the
-> deterministic pre-pass can vouch for — see the [roadmap](#roadmap).
+> Bulk runs (prompts `extraction_v15`–`v16`, Batches API) put 4,805 rows from 52
+> openly-licensed papers into the database, each paper approved in the review
+> queue (2026-11-10). Current work is widening what the deterministic pre-pass
+> can vouch for — see the [roadmap](#roadmap).
 
 Built to solve a real problem for a UCI chemistry lab (thousands of papers,
 none of them machine-readable) and, along the way, to work through the hard
@@ -84,7 +86,7 @@ assistant is just writing a function and registering it as a tool.
 | Area | Choice |
 |---|---|
 | Language | Python 3.11+ |
-| LLM | Anthropic API — Claude Sonnet 5.5 (extraction, with code execution + Files API; Batch API optional) · Claude Haiku (assistant, tool-calling) |
+| LLM | Anthropic API — Claude Sonnet 5.5 (extraction, with code execution + Files API; Message Batches API for bulk runs, optional in the dashboard) · Claude Haiku (assistant, tool-calling) |
 | UI | Streamlit (multi-page) |
 | Database | SQLite (read-only mode for consumers) + a `v_current_best` view |
 | PDF / figures | pdfplumber · pypdf · NumPy / SciPy / scikit-image (deterministic curve extraction) |
@@ -108,6 +110,9 @@ browser, Calculator, Lab Assistant, and Analysis — curves, the pH of 50 %
 extraction across the lanthanide series, separation factors, slope analysis
 and a cross-paper overlay, computed from approved data and marked as computed.
 The SQLite database and data directories are created automatically on first run.
+
+`streamlit run viewer.py` serves only the Database and Analysis pages, read-only,
+over a snapshot written by `python -m database.snapshot` — the hosted viewer.
 
 ## Engineering notes
 
@@ -134,10 +139,11 @@ A few decisions I made deliberately, and why:
 ## Tests
 
 ```bash
-python -m pytest        # 463 tests, no live model or network required
+python -m pytest        # 500 tests, no live model or network required
 ```
 
-The suite covers unit conversions, the solve-for-the-blank calculator and its
+Three of them read the Swain & Otu PDF from `data/incoming/` and are skipped
+without it. The suite covers unit conversions, the solve-for-the-blank calculator and its
 Extract% prediction, the QA checks, dedup, the atomic merge transaction and
 version supersession, the read-only SQL guard, the deterministic curve
 extractor and pre-pass, the extraction client's continuation and batch
@@ -197,10 +203,10 @@ tables to score both against ground truth.
 
 **Building next**
 
-- [ ] **Live validation** of the changes that have only offline tests so far —
-      `extraction_v9`'s log-log sweep recovery, the panel-merge gate, QA-feedback
-      re-extraction, the sandbox toolkit and `extraction_v13` (first: a batch run on the
-      raster Quinn et al. 2015 paper) — then tuning the QA tolerances on the first dozen papers
+- [x] **Live validation at scale** — `extraction_v15`–`v16` through the Batches API on 52
+      open-access papers (40 of them raster), each one approved in the review queue
+- [ ] **Tune the QA tolerances** on that run's flags (4 of the 52 papers were merged
+      over a red flag, with the reason in the audit log)
 - [ ] **Move figure digitizing out of the model's code loop** — a sibling local-model
       experiment showed deterministic code (panels, markers, calibration) plus the model only
       *reading* labels and legends reaches 99.4% recall on the approved Swain & Otu data; the

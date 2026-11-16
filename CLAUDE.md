@@ -18,7 +18,7 @@ Two design documents, referenced by section number throughout the code:
 streamlit run app.py
 
 # Tests (pure/offline — no API calls, no network)
-python -m pytest                    # full suite (~460 tests)
+python -m pytest                    # full suite (~500 tests; 3 need the Swain & Otu PDF in data/incoming/)
 python -m pytest tests/test_solve.py            # one file
 python -m pytest tests/test_checks.py -k monotonicity   # one test by name
 
@@ -62,7 +62,7 @@ The master SQLite DB (`data/master.db`) is the hub. **Pillar A is the only write
 - **Prompt versioning = reproducibility.** The extraction prompt is a pinned, versioned file in `prompts/extraction_vN.md`, loaded only through `extraction/prompt_loader.py`, which records the version + sha256 on every run. Improving extraction means dropping in a new `prompts/` file, adding a `prompts/CHANGELOG.md` entry, and bumping `EXTRACTION_PROMPT_VERSION` — **no pipeline code changes**. A version with a recorded `prompt_runs` row is immutable: never edit it, fork a new version. Never hardcode prompt text elsewhere.
 - **Coexistence, not replacement.** Re-extracting a paper under a new prompt version inserts a new `prompt_runs` row; it never overwrites old data. `v_current_best` (defined in `database/schema.sql`) resolves "each paper's most recently *approved* run" at query time, so old and new prompt versions coexist without migration. Consumers must read `v_current_best`. Note it orders by approval time, not by version string — sorting `prompt_version` as TEXT ranks `extraction_v9` above `extraction_v10`. A side effect worth knowing: re-approving an older version makes it current again, which is the only rollback path for a regressed version.
 - **The DB is only written on human approval,** through the single atomic transaction in `database/merge.py::commit_extraction`. `extraction/runner.py` produces an `ExtractionResult` and touches nothing persistent except each run's transcript (`data/transcripts/`). The bulk CLI never merges. `review_log` is append-only and records no reviewer identity (single shared password ⇒ actor unknowable).
-- **Only openly-licensed papers enter the DB.** `commit_extraction` raises `merge.LicenseRequired` (writing nothing) unless the paper's licence — passed in (from the staged `PaperRef.license`, set from the open-access manifest by PDF sha256 at ingest, or by hand via `staging.set_license`) or already on its `papers` row (`papers_repo.set_license`) — is in `config.OPEN_LICENSES`. Swain & Otu 2011 (paper_id 1, Elsevier, merged before this) has no licence: its rows are untouched, but it cannot be re-approved until the owner records one. The first merge of each day backs the DB up to `data/backups/master-<date>.db` (`connection.backup_once_a_day`).
+- **Only openly-licensed papers enter the DB.** `commit_extraction` raises `merge.LicenseRequired` (writing nothing) unless the paper's licence — passed in (from the staged `PaperRef.license`, set from the open-access manifest by PDF sha256 at ingest, or by hand via `staging.set_license`) or already on its `papers` row (`papers_repo.set_license`) — is in `config.OPEN_LICENSES`. Swain & Otu 2011 (Elsevier, merged before the gate existed) was removed from the DB in 2026-11; it could only come back with a recorded open licence. The first merge of each day backs the DB up to `data/backups/master-<date>.db` (`connection.backup_once_a_day`).
 
 ### Extraction flow (`extraction/runner.py`)
 
