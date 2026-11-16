@@ -264,6 +264,25 @@ def test_batch_jobs_show_expiry_and_keep_the_collection_outcome_on_screen(monkey
     assert at.dataframe[0].value.iloc[0]["Rows"] == 12
 
 
+def test_with_a_write_password_set_nothing_is_rejected_collected_or_discarded_while_locked(monkeypatch):
+    monkeypatch.setattr(config, "REQUIRE_PASSWORD", True)
+    monkeypatch.setattr(config, "WRITE_PASSWORD", "secret")
+    staging.stage(_paper("a", License("cc-by", origin="manifest")), False, _result(_CLEAN))
+    p = _paper("b")
+    BatchJob(batch_id="msgbatch_1", file_ids={p.sha: "file_b"},
+             items={p.sha: BatchItem(p.sha, True, "", [], "v", "s", "m")}, papers={p.sha: p},
+             errors={p.sha: "boom"}).save()
+    at = _run()
+
+    # batch_jobs.collect / discard fail the test if called (the data_dir fixture).
+    for label in ("Reject", "Check status", "Discard failed paper(s)", "Re-run QA checks"):
+        _button(at.run(), label).click().run()   # the prompt stops the run: start each one afresh
+        assert not at.exception, label
+        assert any("requires the shared write password" in i.value for i in at.info), label
+    assert set(staging.load_all()) == {"a" * 64}
+    assert set(staging.load_batch_jobs()) == {"msgbatch_1"}
+
+
 def test_failed_runs_list_their_transcript_and_credit_state():
     from extraction.anthropic_client import CreditExhausted
     staging.record_failed_run(_paper(), CreditExhausted("credit balance is too low"))

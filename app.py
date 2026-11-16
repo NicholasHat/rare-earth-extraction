@@ -287,6 +287,8 @@ def render_batch_jobs() -> None:
             "answered. Reconciling checks the API's batch list and adopts or cleans up each one."
         )
         if st.button("Reconcile with the API", key="batch_reconcile"):
+            if not auth.require_write_access():
+                st.stop()
             _reconcile()
             st.rerun()
     now = datetime.now(timezone.utc)
@@ -308,6 +310,8 @@ def render_batch_jobs() -> None:
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Check status", key=f"batch_status_{batch_id}", disabled=in_progress):
+                    if not auth.require_write_access():
+                        st.stop()
                     with st.spinner(
                         "Collecting batch results — this can take a while if any "
                         "paper needs an extra synchronous digitization round..."
@@ -316,6 +320,8 @@ def render_batch_jobs() -> None:
                     st.rerun()
             with col2:
                 if job.errors and st.button("Discard failed paper(s)", key=f"batch_discard_{batch_id}"):
+                    if not auth.require_write_access():
+                        st.stop()
                     try:
                         batch_jobs.discard(batch_id)
                     except staging.Busy as e:
@@ -634,6 +640,8 @@ def render_review_queue() -> None:
     # today's checks without another extraction. Replaces the staged report.
     if col_qa.button("Re-run QA checks", key=f"requa_{sha}",
                      help="Re-apply the current validation checks to this staged table (no API call)."):
+        if not auth.require_write_access():
+            st.stop()
         staging.stage(paper, staged.figure_is_curve, runner.rerun_qa(result, figure_is_curve=staged.figure_is_curve))
         st.session_state.pop(drop_key, None)
         st.rerun()
@@ -678,6 +686,8 @@ def render_review_queue() -> None:
         st.rerun()
 
     if col_b.button("Reject", key=f"reject_{sha}"):
+        if not auth.require_write_access():
+            st.stop()
         staging.discard(sha)
         st.info(f"{paper.filename} rejected and discarded (nothing written to the master DB).")
         st.rerun()
