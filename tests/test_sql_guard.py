@@ -115,6 +115,35 @@ def test_cte_may_not_shadow_an_allow_listed_relation():
         guard("WITH v_current_best AS (SELECT * FROM extractions) SELECT * FROM v_current_best")
 
 
+@pytest.mark.parametrize(
+    "cte",
+    [
+        'v_current_best(n)',
+        '"v_current_best"',
+        "'v_current_best'",
+        "[v_current_best]",
+        "`V_Current_Best`",
+        "x AS (SELECT 1), v_current_best",
+        'v_current_best ("a)b")',
+    ],
+)
+@pytest.mark.parametrize("materialized", ["", "MATERIALIZED", "NOT MATERIALIZED"])
+def test_cte_may_not_shadow_an_allow_listed_relation_however_it_is_written(conn, cte, materialized):
+    """A quoted name, a column list or a MATERIALIZED hint is still the same
+    CTE; the authorizer can't tell any of them from the real view, so a
+    query that slips past the name check reads `extractions` unhindered."""
+    sql = (f"WITH {cte} AS {materialized} (SELECT COUNT(*) FROM papers, review_log) "
+           "SELECT * FROM v_current_best")
+    with pytest.raises(SQLGuardError, match="may not reuse"):
+        guard(sql)
+    assert "may not reuse" in json.loads(tools.query_database(conn, sql))["error"]
+
+
+def test_a_cte_named_like_no_allowed_relation_is_still_fine(conn):
+    assert _run(conn, 'WITH "my_papers"(id) AS MATERIALIZED (SELECT paper_id FROM papers) '
+                      'SELECT * FROM "my_papers"') == []
+
+
 # --- the authorizer: enforcement the regex pre-check cannot do ----------------
 
 def _run(conn, sql):

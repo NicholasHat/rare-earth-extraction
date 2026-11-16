@@ -14,7 +14,10 @@ Layer 3 is the authoritative allow-list. It is a callback SQLite invokes while
 regardless of how it was written — comma joins, table-valued functions,
 correlated subqueries, nested views. `guard()` also does a regex pre-check on
 table names, but only to produce a friendlier error before execution: a
-reference it misses is still denied by the authorizer.
+reference it misses is still denied by the authorizer. The one thing the
+authorizer cannot see is a CTE named like an allow-listed view -- reads inside
+it are reported exactly as a real view expansion's -- so `guard()`'s refusal
+of such a CTE is load-bearing, and it works on tokens rather than a pattern.
 """
 from __future__ import annotations
 
@@ -38,7 +41,16 @@ _WRITE_AFTER_WITH = ("INSERT", "UPDATE", "DELETE")
 
 _COMMENT_RE = re.compile(r"--.*?$|/\*.*?\*/", re.MULTILINE | re.DOTALL)
 _TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+\"?(\w+)\"?", re.IGNORECASE)
-_CTE_NAME_RE = re.compile(r"\b(\w+)\s+AS\s*\(", re.IGNORECASE)
+# SQLite's tokens, as far as the guard needs them: a quoted token is one token
+# whatever it contains ('...', "...", `...`, [...] -- SQLite accepts any of
+# them as a name), and a word is a bare identifier or keyword.
+_TOKEN_RE = re.compile(
+    r"""(?P<quoted>'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\])
+      | (?P<word>\w+)
+      | (?P<space>\s+)
+      | (?P<other>.)""",
+    re.VERBOSE | re.DOTALL,
+)
 _LIMIT_RE = re.compile(r"\bLIMIT\b", re.IGNORECASE)
 _LEADING_RE = re.compile(r"^(SELECT|WITH)\b", re.IGNORECASE)
 
@@ -51,6 +63,49 @@ _UNCONDITIONAL_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTI
 
 class SQLGuardError(ValueError):
     """Raised when a query fails the read-only / allow-list guard."""
+
+
+def _tokens(sql: str) -> list[tuple[str, str]]:
+    """(kind, text) for every token but whitespace; a quoted token's text is
+    its unquoted name and a word's is lower-cased, so both compare as names."""
+    out = []
+    for m in _TOKEN_RE.finditer(sql):
+        kind, text = m.lastgroup, m.group()
+        if kind == "quoted":
+            q = text[0]
+            text = text[1:-1].replace(q * 2, q) if q != "[" else text[1:-1]
+            out.append(("name", text.lower()))
+        elif kind == "word":
+            out.append(("name", text.lower()))
+        elif kind == "other":
+            out.append(("other", text))
+    return out
+
+
+def _cte_names(tokens: list[tuple[str, str]]) -> set[str]:
+    """Every name the query defines as a CTE, however it is written:
+    `name [(columns)] AS [[NOT] MATERIALIZED] (`, the name bare or quoted."""
+    names = set()
+    for i, (kind, text) in enumerate(tokens):
+        if kind != "name":
+            continue
+        j = i + 1
+        if j < len(tokens) and tokens[j] == ("other", "("):   # a column list
+            depth = 0
+            for j in range(j, len(tokens)):
+                depth += {"(": 1, ")": -1}.get(tokens[j][1], 0) if tokens[j][0] == "other" else 0
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(tokens) or tokens[j] != ("name", "as"):
+            continue
+        j += 1
+        for optional in ("not", "materialized"):
+            if j < len(tokens) and tokens[j] == ("name", optional):
+                j += 1
+        if j < len(tokens) and tokens[j] == ("other", "("):
+            names.add(text)
+    return names
 
 
 def _allow_list_error(names) -> str:
@@ -87,8 +142,10 @@ def guard(sql: str) -> str:
     # than real tables. A CTE may NOT reuse an allow-listed name: SQLite lets a
     # CTE shadow a real view, and the authorizer reports reads inside it as
     # coming from that name -- so `WITH v_current_best AS (SELECT * FROM
-    # extractions) ...` would otherwise launder a raw-table read.
-    cte_names = {m.group(1).lower() for m in _CTE_NAME_RE.finditer(body)}
+    # extractions) ...` would otherwise launder a raw-table read. The names are
+    # found on SQLite's tokens, not a pattern over the text: a quoted name or a
+    # column list (`WITH "v_current_best"(n) AS ...`) is the same CTE.
+    cte_names = _cte_names(_tokens(body))
     shadowed = cte_names & ALLOWED_TABLES
     if shadowed:
         raise SQLGuardError(
