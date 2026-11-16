@@ -124,6 +124,24 @@ def test_quoted_column_name_with_percent_does_not_break_guard():
     assert "LIMIT" in out
 
 
+@pytest.mark.parametrize(
+    "literal",
+    ["'%--%'", "'a /* b'", "'x; y'", "'%update%'", "'from extractions'", "\"Material -- Process\""],
+)
+def test_text_inside_quotes_is_not_read_as_sql(conn, literal):
+    """A comment marker, a semicolon, a write keyword or a table name inside a
+    string or quoted name is just text: the query runs as written."""
+    sql = f"SELECT COUNT(*) AS n FROM papers WHERE title != {literal}"
+    if literal.startswith('"'):
+        sql = f'SELECT {literal} FROM (SELECT 1 AS {literal}) WHERE 0'
+    assert "error" not in json.loads(tools.query_database(conn, sql))
+
+
+def test_a_comment_still_cannot_hide_a_second_statement():
+    with pytest.raises(SQLGuardError, match="multiple statements"):
+        guard("SELECT 1 FROM papers -- '\n; DROP TABLE papers")
+
+
 def test_replace_function_is_not_mistaken_for_a_write():
     """`replace()` is an ordinary string function; only `REPLACE INTO` writes,
     and that can't get past the leading SELECT/WITH check."""
@@ -177,7 +195,7 @@ def _run(conn, sql):
 @pytest.mark.parametrize(
     "sql",
     [
-        # Old-style comma joins: _TABLE_REF_RE only sees the table after FROM.
+        # Old-style comma joins: the pre-check only sees the table after FROM.
         "SELECT * FROM v_current_best, extractions",
         "SELECT * FROM papers, sqlite_master",
         "SELECT * FROM papers p, review_log r",

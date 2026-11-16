@@ -12,7 +12,7 @@ because of three independent layers:
 Layer 3 is the authoritative allow-list. It is a callback SQLite invokes while
 *compiling* the statement, so it sees every relation the query actually touches
 regardless of how it was written — comma joins, table-valued functions,
-correlated subqueries, nested views. `guard()` also does a regex pre-check on
+correlated subqueries, nested views. `guard()` also does a pre-check on
 table names, but only to produce a friendlier error before execution: a
 reference it misses is still denied by the authorizer. The one thing the
 authorizer cannot see is a CTE named like an allow-listed view -- reads inside
@@ -39,13 +39,14 @@ DEFAULT_LIMIT = 500
 # included REPLACE, which rejected any query using the replace() function.
 _WRITE_AFTER_WITH = ("INSERT", "UPDATE", "DELETE")
 
-_COMMENT_RE = re.compile(r"--.*?$|/\*.*?\*/", re.MULTILINE | re.DOTALL)
-_TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+\"?(\w+)\"?", re.IGNORECASE)
 # SQLite's tokens, as far as the guard needs them: a quoted token is one token
 # whatever it contains ('...', "...", `...`, [...] -- SQLite accepts any of
-# them as a name), and a word is a bare identifier or keyword.
+# them as a name), so `--`, `;` or a keyword inside one is just text; a
+# comment runs to the end of its line or its `*/`; a word is a bare
+# identifier or keyword.
 _TOKEN_RE = re.compile(
     r"""(?P<quoted>'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\])
+      | (?P<comment>--[^\n]*|/\*.*?(?:\*/|\Z))
       | (?P<word>\w+)
       | (?P<space>\s+)
       | (?P<other>.)""",
@@ -64,8 +65,12 @@ class SQLGuardError(ValueError):
     """Raised when a query fails the read-only / allow-list guard."""
 
 
+def _strip_comments(sql: str) -> str:
+    return "".join(" " if m.lastgroup == "comment" else m.group() for m in _TOKEN_RE.finditer(sql))
+
+
 def _tokens(sql: str) -> list[tuple[str, str]]:
-    """(kind, text) for every token but whitespace: kind is 'word' (a bare
+    """(kind, text) for every token but whitespace and comments: kind is 'word' (a bare
     identifier or keyword), 'quoted' (text unquoted -- a string or a quoted
     name, which SQLite treats alike) or 'other'. Names are lower-cased."""
     out = []
@@ -134,20 +139,21 @@ def guard(sql: str) -> str:
     WITH/CTE). Run the result inside `authorized(conn)` -- the table allow-list
     is enforced there, not here.
     """
-    clean = _COMMENT_RE.sub(" ", sql).strip()
+    clean = _strip_comments(sql).strip()
     if not clean:
         raise SQLGuardError("empty query")
 
     # Allow exactly one optional trailing semicolon; reject stacked statements.
     body = clean[:-1].strip() if clean.endswith(";") else clean
-    if ";" in body:
+    tokens = _tokens(body)
+    if ("other", ";") in tokens:
         raise SQLGuardError("multiple statements are not allowed")
 
     if not _LEADING_RE.match(body):
         raise SQLGuardError("only SELECT statements (optionally a leading WITH/CTE) are allowed")
 
     for kw in _WRITE_AFTER_WITH:
-        if re.search(rf"\b{kw}\b", body, re.IGNORECASE):
+        if ("word", kw.lower()) in tokens:
             raise SQLGuardError(f"forbidden keyword: {kw}")
 
     # A WITH clause defines its own CTE names, which are local aliases rather
@@ -157,7 +163,7 @@ def guard(sql: str) -> str:
     # extractions) ...` would otherwise launder a raw-table read. The names are
     # found on SQLite's tokens, not a pattern over the text: a quoted name or a
     # column list (`WITH "v_current_best"(n) AS ...`) is the same CTE.
-    cte_names = _cte_names(_tokens(body))
+    cte_names = _cte_names(tokens)
     shadowed = cte_names & ALLOWED_TABLES
     if shadowed:
         raise SQLGuardError(
@@ -166,12 +172,13 @@ def guard(sql: str) -> str:
 
     # Advisory only -- see the module docstring. Catches the common case with a
     # clear message before the query runs; the authorizer is what guarantees it.
-    tables = {m.group(1).lower() for m in _TABLE_REF_RE.finditer(body)}
+    tables = {name for (kind, text), (name_kind, name) in zip(tokens, tokens[1:])
+              if kind == "word" and text in ("from", "join") and name_kind != "other"}
     disallowed = tables - ALLOWED_TABLES - cte_names
     if disallowed:
         raise SQLGuardError(_allow_list_error(disallowed))
 
-    if not _has_outer_limit(_tokens(body)):
+    if not _has_outer_limit(tokens):
         body = f"{body.rstrip()} LIMIT {DEFAULT_LIMIT}"
 
     return body
