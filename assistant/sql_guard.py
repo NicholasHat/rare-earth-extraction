@@ -125,6 +125,15 @@ def _has_outer_limit(tokens: list[tuple[str, str]]) -> bool:
     return False
 
 
+def _is_distinct_from(tokens: list[tuple[str, str]], i: int) -> bool:
+    """Whether the `from` at tokens[i] is part of the `IS [NOT] DISTINCT FROM`
+    comparison operator rather than a FROM clause: what follows it is an
+    operand, not a table."""
+    before = tokens[max(i - 3, 0):i]
+    return (before[-2:] == [("word", "is"), ("word", "distinct")]
+            or before == [("word", "is"), ("word", "not"), ("word", "distinct")])
+
+
 def _allow_list_error(names) -> str:
     return (
         f"query references table(s) not on the allow-list: {sorted(names)}. "
@@ -172,8 +181,9 @@ def guard(sql: str) -> str:
 
     # Advisory only -- see the module docstring. Catches the common case with a
     # clear message before the query runs; the authorizer is what guarantees it.
-    tables = {name for (kind, text), (name_kind, name) in zip(tokens, tokens[1:])
-              if kind == "word" and text in ("from", "join") and name_kind != "other"}
+    tables = {name for i, ((kind, text), (name_kind, name)) in enumerate(zip(tokens, tokens[1:]))
+              if kind == "word" and text in ("from", "join") and name_kind != "other"
+              and not _is_distinct_from(tokens, i)}
     disallowed = tables - ALLOWED_TABLES - cte_names
     if disallowed:
         raise SQLGuardError(_allow_list_error(disallowed))

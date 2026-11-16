@@ -236,3 +236,29 @@ def test_authorizer_is_uninstalled_after_a_denial(conn):
 def test_query_database_reports_a_denied_relation_instead_of_crashing(conn):
     out = json.loads(tools.query_database(conn, "SELECT * FROM v_current_best, extractions"))
     assert "allow-list" in out["error"]
+
+
+# --- IS [NOT] DISTINCT FROM is an operator, not a FROM clause -----------------
+
+@pytest.mark.parametrize("sql", [
+    'SELECT COUNT(*) FROM v_current_best WHERE "Diluent" IS DISTINCT FROM "Extractant"',
+    'SELECT COUNT(*) FROM v_current_best WHERE "pH type" is not distinct from NULL',
+    "SELECT COUNT(*) FROM papers WHERE doi IS /* c */ DISTINCT\n FROM title",
+    "SELECT COUNT(*) FROM papers WHERE doi IS DISTINCT FROM (SELECT MAX(doi) FROM papers)",
+])
+def test_is_distinct_from_is_not_read_as_a_table(conn, sql):
+    assert json.loads(tools.query_database(conn, sql)) == [{"COUNT(*)": 0}]
+
+
+@pytest.mark.parametrize("sql", [
+    # the subquery's own FROM is still a FROM clause (pre-check) ...
+    "SELECT * FROM papers WHERE doi IS DISTINCT FROM (SELECT MAX(DOI) FROM extractions)",
+    "SELECT * FROM papers WHERE doi IS NOT DISTINCT FROM (SELECT note FROM review_log)",
+    # ... and what the pre-check can't see, the authorizer denies.
+    "SELECT * FROM papers WHERE doi IS DISTINCT FROM (SELECT MAX(e.DOI) FROM papers, extractions e)",
+    "SELECT * FROM papers WHERE doi IS DISTINCT FROM (SELECT p.doi FROM papers p, pragma_table_info('extractions'))",
+])
+def test_is_distinct_from_opens_no_way_past_the_allow_list(conn, sql):
+    with pytest.raises(SQLGuardError):
+        _run(conn, sql)
+    assert "error" in json.loads(tools.query_database(conn, sql))
